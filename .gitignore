@@ -1,0 +1,223 @@
+# =========================
+
+# OS / Editor
+
+# =========================
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+
+# Environment / Secrets
+
+# =========================
+
+.env
+.env.*
+!.env.example
+
+# =========================
+
+# Python
+
+# =========================
+
+**pycache**/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Testing / coverage
+
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Type checking / linting
+
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# Jupyter
+
+.ipynb_checkpoints/
+
+# =========================
+
+# Node.js
+
+# =========================
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Package manager files
+
+.npm/
+.pnpm-store/
+
+# Build outputs
+
+.next/
+.nuxt/
+dist/
+build/
+out/
+
+# Vite
+
+.vite/
+
+# TypeScript
+
+*.tsbuildinfo
+
+# =========================
+
+# AI / RAG
+
+# =========================
+
+# Local vector databases / indexes
+
+faiss_index/
+faiss_indexes/
+chroma/
+chroma_db/
+qdrant_storage/
+vector_store/
+vector_db/
+
+# Local embeddings / models
+
+models/
+*.gguf
+*.bin
+*.safetensors
+
+# =========================
+
+# Uploaded / Processed Documents
+
+# =========================
+
+uploads/
+uploaded_files/
+documents/
+processed_documents/
+parsed_documents/
+
+# PDF / document temporary files
+
+*.tmp
+*.temp
+
+# =========================
+
+# Databases
+
+# =========================
+
+*.db
+*.sqlite
+*.sqlite3
+
+# Keep database schema/migrations if needed
+
+# migrations/
+
+# =========================
+
+# Logs
+
+# =========================
+
+*.log
+logs/
+
+# =========================
+
+# Cache / Temporary
+
+# =========================
+
+.cache/
+tmp/
+temp/
+
+# =========================
+
+# Docker
+
+# =========================
+
+docker-compose.override.yml
+
+# =========================
+
+# Archive AI specific
+
+# =========================
+
+# Generated AI responses
+
+generated/
+outputs/
+
+# Local ingestion data
+
+data/raw/
+data/processed/
+data/indexed/
+
+# Local evaluation results
+
+eval_results/
+
+# =========================
+
+# Secrets / Credentials
+
+# =========================
+
+*.pem
+*.key
+*.crt
+credentials.json
+service-account.json
+
+# =========================
+
+# Misc
+
+# =========================
+
+*.bak
+*.backup
+*.orig
+.Dockerfile.swp
