@@ -1,0 +1,109 @@
+"use client";
+import { Globe, Link } from "lucide-react";
+import { useTranslations } from "next-intl";
+import { cn } from "@/lib/utils";
+
+interface WebHit {
+  title: string;
+  url: string;
+  content: string;
+  score?: number | null;
+}
+
+export interface WebSearchPayload {
+  query: string;
+  results: WebHit[];
+}
+
+/** Parse a structured `web_search` tool result, or null if it isn't one
+ *  (error string / legacy text → caller falls back to the default renderer). */
+export function parseWebSearch(result: string): WebSearchPayload | null {
+  try {
+    const p = JSON.parse(result);
+    if (p && typeof p === "object" && p.kind === "web_search" && Array.isArray(p.results)) {
+      return { query: String(p.query ?? ""), results: p.results as WebHit[] };
+    }
+  } catch {
+    /* not JSON - fall back to the raw renderer */
+  }
+  return null;
+}
+
+function domainOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+export function WebSearchResults({
+  data,
+  detailed = false,
+}: {
+  data: WebSearchPayload;
+  /** Deep-dive view (computer panel): show relevance scores and the full snippet. */
+  detailed?: boolean;
+}) {
+  const t = useTranslations("chat.tools");
+  if (data.results.length === 0) {
+    return (
+      <div className="text-muted-foreground flex items-center gap-2 py-2 text-sm">
+        <Globe className="h-4 w-4" />
+        {t("noWebResults")}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3 py-1">
+      <div className="text-muted-foreground flex items-center gap-2 font-mono text-[11px] tracking-wider uppercase">
+        <Globe className="h-3 w-3" />
+        <span>{t("webResultCount", { count: data.results.length })}</span>
+        {detailed && data.query && (
+          <span className="text-muted-foreground truncate normal-case">· “{data.query}”</span>
+        )}
+      </div>
+
+      <div className="border-foreground/10 divide-foreground/8 divide-y overflow-hidden rounded-xl border">
+        {data.results.map((hit, i) => (
+          <a
+            key={`${hit.url}-${i}`}
+            href={hit.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:bg-foreground/[0.03] block px-3 py-2.5 transition-colors"
+          >
+            <div className="flex items-center gap-2">
+              <span className="bg-foreground/8 text-foreground/65 inline-flex h-5 min-w-[1.5rem] shrink-0 items-center justify-center rounded px-1 font-mono text-[11px] tabular-nums">
+                {i + 1}
+              </span>
+              <p className="text-foreground min-w-0 flex-1 truncate text-xs font-medium">
+                {hit.title}
+              </p>
+              {detailed && typeof hit.score === "number" && (
+                <span className="bg-brand/10 text-brand shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] tabular-nums">
+                  {(hit.score * 100).toFixed(0)}%
+                </span>
+              )}
+            </div>
+            <div className="text-primary mt-1 flex items-center gap-1 truncate pl-[calc(1.5rem+0.5rem)] text-[11px]">
+              <Link className="h-2.5 w-2.5 shrink-0" />
+              {domainOf(hit.url)}
+            </div>
+            {hit.content && (
+              <p
+                className={cn(
+                  "text-muted-foreground mt-1 pl-[calc(1.5rem+0.5rem)] text-xs leading-relaxed",
+                  detailed ? "whitespace-pre-wrap" : "line-clamp-2",
+                )}
+              >
+                {hit.content}
+              </p>
+            )}
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}

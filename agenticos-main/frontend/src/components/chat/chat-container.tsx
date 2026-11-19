@@ -1,0 +1,808 @@
+"use client";
+
+import { useEffect, useLayoutEffect, useRef, useCallback, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
+import type { ChatMessageFile } from "@/types";
+import type { PublishedModel } from "@/types/agents";
+import { useAgents, useChat, useConversationWorkspace, useModelProviders } from "@/hooks";
+import { AgentPicker } from "./agent-picker";
+import { ChatControls } from "./chat-controls";
+import { ChatEmptyState } from "./chat-empty-state";
+import { ChatInput } from "./chat-input";
+import { ComposerStatus } from "./composer-status";
+import { UsageMeter } from "./usage-meter";
+import { WorkspaceFiles } from "./workspace-files";
+import { FilePreviewDialog } from "./file-preview-dialog";
+import type { Browse } from "@/lib/browse";
+import { BrowserCards } from "./browser-card";
+import { BrowserPanel } from "./browser-panel";
+import { SourcesPanel } from "./sources-panel";
+import { MessageList } from "./message-list";
+import { TurnRail } from "./turn-rail";
+import { DelegationPanels } from "./delegation-panel";
+import { CompactionNotice } from "./compaction-notice";
+import { InterruptedNotice } from "./interrupted-notice";
+import { ConnectAccountPrompt } from "./connect-account-prompt";
+import { ConnectServicesCard } from "./connect-services-card";
+import { PendingMessages } from "./pending-messages";
+import { PlanStrip } from "./plan-strip";
+import { ToolApprovalDialog } from "./tool-approval-dialog";
+import { QuestionPrompt } from "@/components/ui";
+import type {
+  PendingApproval,
+  AskUserQuestion,
+  AskUserAnswer,
+  Compaction,
+  ConnectionRequest,
+  PersonalServiceGap,
+  ConversationCost,
+  Decision,
+  Delegation,
+  TurnUsage,
+} from "@/types";
+import { conversationMessageToChatMessage } from "@/lib/conversation-to-chat";
+import { latestUsage } from "@/lib/message-usage";
+import { planProgress } from "@/lib/plan-state";
+import {
+  useAgentSelectionStore,
+  useAuthStore,
+  useChatStore,
+  useConversationStore,
+  useFilePreviewStore,
+} from "@/stores";
+import { useConversations } from "@/hooks";
+import { useSlashCommands } from "@/hooks";
+import { useFollowContent } from "@/hooks/use-follow-content";
+import { Beam } from "@/components/ui/beam";
+import { useMicrophone, VoiceGlow } from "@/components/ui/voice-glow";
+
+const SCROLL_NEAR_BOTTOM_THRESHOLD_PX = 150;
+
+/**
+ * How many tokens the model that will answer next accepts, or `null`.
+ *
+ * The denominator of the context gauge, and deliberately not stored with the
+ * reading it divides: how much history there is survives a model change, what
+ * share of a window that is does not. A history of 500,000 tokens is half of a
+ * 1M-context model and 390% of a 128K one, and the second is a request the
+ * provider refuses outright — so the figure has to move the moment somebody
+ * switches, which it does because this is read from the current selection.
+ *
+ * The override the picker holds first, then the agent's own published model.
+ * `null` where neither can say, and the gauge is then not drawn at all: a share
+ * against an assumed window is a guess presented as a measurement, and the guess
+ * errs in the direction that lets a run reach the ceiling.
+ */
+function useContextWindow(modelProfileId: string | null): number | null {
+  const { profiles } = useModelProviders();
+  const { agents } = useAgents({ includeArchived: true });
+  const selectedAgentId = useAgentSelectionStore((state) => state.selectedAgentId);
+
+  if (modelProfileId !== null) {
+    return profiles.find((profile) => profile.id === modelProfileId)?.context_length ?? null;
+  }
+  return agents.find((agent) => agent.id === selectedAgentId)?.context_window_tokens ?? null;
+}
+
+export function ChatContainer() {
+  const {
+    currentConversationId,
+    currentMessages,
+    currentCost,
+    isLoading: isConversationLoading,
+  } = useConversationStore();
+  const { addMessage: addChatMessage } = useChatStore();
+  // The model override the picker holds, mirrored here because the context gauge
+  // is a share of *its* window rather than of the agent's default.
+  const [modelProfileId, setModelProfileId] = useState<string | null>(null);
+  const contextWindow = useContextWindow(modelProfileId);
+  const { agents } = useAgents({ includeArchived: true });
+  const selectedAgentId = useAgentSelectionStore((state) => state.selectedAgentId);
+  const agentModel = agents.find((agent) => agent.id === selectedAgentId)?.published_model ?? null;
+  // Deliberately unfiltered, which is what calling this with no arguments
+  // means. The sidebar's copy of this list is narrowed by whatever is in its
+  // search box, and reading the two facts below off *that* would flip the
+  // composer to writable the moment somebody typed a search that excluded the
+  // thread they have open.
+  const { conversations, fetchConversations, refreshConversations, selectConversation } =
+    useConversations();
+  const prevConversationIdRef = useRef<string | null | undefined>(undefined);
+
+  // An archived conversation is read-only: the backend refuses new messages on
+  // it, so the composer says so instead of letting a send fail server-side.
+  const isArchived =
+    conversations.find((conversation) => conversation.id === currentConversationId)?.is_archived ??
+    false;
+
+  // The one agent a conversation used, when it used exactly one. Recovered from the
+  // conversation rather than the message, which is the only source history has left.
+  const conversationAgents = conversations.find(
+    (conversation) => conversation.id === currentConversationId,
+  )?.agents;
+  const soleAgentId = conversationAgents?.length === 1 ? conversationAgents[0]?.id : undefined;
+
+  const handleConversationCreated = useCallback(() => {
+    fetchConversations();
+  }, [fetchConversations]);
+
+  // A listing fetched when the conversation was created cannot say who answered
+  // in it, because at that moment nobody had: `agents` is derived from the turns
+  // stored in the thread. Nothing else asked again, so the face of the agent you
+  // are talking to arrived on the next full page load and not before.
+  const handleTurnSaved = useCallback(() => {
+    void refreshConversations();
+  }, [refreshConversations]);
+
+  // The socket went away mid-answer. The turn is still being written server-side
+  // and the transcript is where it lands, so re-read it - once now, and again
+  // whenever the reader presses the notice, because the turn finishes when it
+  // finishes and there is nothing to be told about it.
+  const handleTurnInterrupted = useCallback(() => {
+    if (currentConversationId) void selectConversation(currentConversationId);
+  }, [currentConversationId, selectConversation]);
+
+  const {
+    messages,
+    isConnected,
+    isProcessing,
+    compacting,
+    compactionImpossible,
+    interrupted,
+    detachedTurnPending,
+    acknowledgeDetachedTurn,
+    personalGaps,
+    lastUsage,
+    delegations,
+    browses,
+    sendMessage,
+    stopGeneration,
+    clearMessages,
+    queuedMessages,
+    cancelQueued,
+    clearQueued,
+    setModelProfile,
+    setApprovalMode,
+    pendingApproval,
+    sendResumeDecisions,
+    pendingQuestions,
+    sendAskUserResponses,
+    pendingConnection,
+    sendConnectionResponse,
+  } = useChat({
+    conversationId: currentConversationId,
+    onConversationCreated: handleConversationCreated,
+    onTurnSaved: handleTurnSaved,
+    onTurnInterrupted: handleTurnInterrupted,
+  });
+
+  // The reader pressing the notice's button has gone to look for the answer, so
+  // the notice stops saying one is on its way. The re-read is the same one a
+  // reconnect does; only the acknowledgement is extra.
+  const handleRecheck = useCallback(() => {
+    acknowledgeDetachedTurn();
+    handleTurnInterrupted();
+  }, [acknowledgeDetachedTurn, handleTurnInterrupted]);
+
+  // What the file panel watches, rather than a timer. Counted from the transcript
+  // rather than kept as state: a finished assistant message *is* a finished turn,
+  // and a second counter would be a second answer to the same question.
+  const turns = messages.filter(
+    (message) => message.role === "assistant" && !message.isStreaming,
+  ).length;
+
+  // Everything attached to this conversation, deduplicated by id and in the order it
+  // arrived. Derived from the messages rather than fetched: they carry their
+  // attachments both live and after a reload, so the file panel can list what
+  // somebody dragged in without a request for what is already on screen.
+  const attachments = useMemo(() => {
+    const seen = new Map<string, ChatMessageFile>();
+    for (const message of messages) for (const file of message.files ?? []) seen.set(file.id, file);
+    return [...seen.values()];
+  }, [messages]);
+
+  // Handed to the store as well as to the panel, so the file dialog's carousel
+  // pages through the conversation wherever a file was clicked. In an effect
+  // rather than during render: writing to a store while rendering is a side
+  // effect, and React is entitled to render this twice.
+  const setAvailableFiles = useFilePreviewStore((state) => state.setAvailable);
+  useEffect(() => {
+    setAvailableFiles(attachments);
+  }, [attachments, setAvailableFiles]);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  // true = user deliberately scrolled up; suppress auto-scroll until they return to bottom
+  const userScrolledUpRef = useRef(false);
+
+  // Clear messages when conversation changes, but NOT when going from null to a new ID
+  // (that happens when a new chat is saved - we want to keep the messages)
+  useEffect(() => {
+    const prevId = prevConversationIdRef.current;
+    const currId = currentConversationId;
+
+    // Skip initial mount
+    if (prevId === undefined) {
+      prevConversationIdRef.current = currId;
+      return;
+    }
+
+    // Clear messages when:
+    // 1. Going from a conversation to null (new chat)
+    // 2. Switching between two different conversations
+    // Do NOT clear when going from null to a conversation (new chat being saved)
+    const shouldClear =
+      currId === null || // Going to new chat
+      (prevId !== null && prevId !== currId); // Switching between conversations
+
+    if (shouldClear) {
+      clearMessages();
+      // Drop any pending queue when switching threads - those messages were
+      // typed in the previous conversation's context, sending them into a
+      // different conversation would surprise the user.
+      clearQueued();
+    }
+
+    prevConversationIdRef.current = currId;
+  }, [currentConversationId, clearMessages, clearQueued]);
+
+  useEffect(() => {
+    if (currentMessages.length > 0) {
+      clearMessages();
+      currentMessages.forEach((msg) => {
+        const message = conversationMessageToChatMessage(msg);
+        addChatMessage({
+          ...message,
+          // The row is what says which agent produced a turn. When it says nothing -
+          // every message written before the API recorded it - and the conversation
+          // had exactly *one* agent, that agent answered every turn in it, and the
+          // transcript can show its face instead of a generic robot. With two the
+          // guess would relabel half the thread, so it is not made.
+          agentId: message.agentId ?? soleAgentId,
+        });
+      });
+    }
+  }, [currentMessages, addChatMessage, clearMessages]);
+
+  // Track whether the user has manually scrolled up so we don't hijack their position
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const handleScroll = () => {
+      const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      userScrolledUpRef.current = distFromBottom > SCROLL_NEAR_BOTTOM_THRESHOLD_PX;
+    };
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  // Auto-scroll on every messages update unless user has scrolled up
+  useEffect(() => {
+    if (userScrolledUpRef.current) return;
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+  // And on growth the messages do not announce: an answer's last words are
+  // revealed over frames after its message has stopped changing.
+  useFollowContent(scrollContainerRef, transcriptRef, userScrolledUpRef);
+  const { commands: slashCommands } = useSlashCommands();
+
+  const handleRegenerate = useCallback(
+    (assistantMessageId: string) => {
+      const idx = messages.findIndex((m) => m.id === assistantMessageId);
+      if (idx < 0) return;
+      for (let i = idx - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m?.role === "user") {
+          sendMessage(m.content, m.fileIds, m.files);
+          return;
+        }
+      }
+    },
+    [messages, sendMessage],
+  );
+
+  // Slash command handlers - passed down to ChatInput so the / palette can
+  // run them locally without going through the agent.
+  const slashContext = {
+    clearChat: clearMessages,
+    regenerateLast: () => {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m && m.role === "assistant") {
+          handleRegenerate(m.id);
+          return;
+        }
+      }
+    },
+    openSettings: () => {
+      document.querySelector<HTMLButtonElement>("[data-chat-settings-trigger]")?.click();
+    },
+  };
+
+  return (
+    <ChatUI
+      messages={messages}
+      isConnected={isConnected}
+      isProcessing={isProcessing}
+      compacting={compacting}
+      compactionImpossible={compactionImpossible}
+      interrupted={interrupted}
+      detachedTurnPending={detachedTurnPending}
+      onRecheck={handleRecheck}
+      personalGaps={personalGaps}
+      // The live turn's cost while there is one, and the newest measured answer in
+      // the transcript otherwise - which is what makes the strip appear on a
+      // conversation somebody has just reopened instead of after their next message.
+      lastUsage={lastUsage ?? latestUsage(currentMessages, currentConversationId)}
+      contextWindow={contextWindow}
+      agentModel={agentModel}
+      // Only for the thread that is actually open. The store keeps the transcript
+      // it last loaded, so between clicking another conversation and its messages
+      // arriving this figure belongs to the one just left - the same reason
+      // `latestUsage` is given the id rather than trusting the list.
+      conversationCost={currentConversationId === null ? null : currentCost}
+      delegations={delegations}
+      browses={browses}
+      conversationId={currentConversationId}
+      turns={turns}
+      attachments={attachments}
+      isLoadingConversation={
+        currentConversationId !== null && isConversationLoading && messages.length === 0
+      }
+      isArchived={isArchived}
+      sendMessage={sendMessage}
+      // Kept here as well as pushed into the hook, because the context gauge is a
+      // share of *this* model's window: a switch has to move the figure at once,
+      // and one carried over from a 1M-context model reads "50%" for a history
+      // that is really at 390% of a 128K one.
+      onModelProfileChange={(profileId) => {
+        setModelProfile(profileId);
+        setModelProfileId(profileId);
+      }}
+      // Only into the hook: nothing on screen is a share of it, unlike the
+      // context gauge the model switch has to move.
+      onApprovalModeChange={setApprovalMode}
+      onRegenerate={handleRegenerate}
+      slashContext={slashContext}
+      slashCommands={slashCommands}
+      queuedMessages={queuedMessages}
+      onCancelQueued={cancelQueued}
+      messagesEndRef={messagesEndRef}
+      transcriptRef={transcriptRef}
+      scrollContainerRef={scrollContainerRef}
+      pendingApproval={pendingApproval}
+      onResumeDecisions={sendResumeDecisions}
+      pendingQuestions={pendingQuestions}
+      onAnswerQuestions={sendAskUserResponses}
+      pendingConnection={pendingConnection}
+      onConnectionResponse={sendConnectionResponse}
+      onStop={stopGeneration}
+    />
+  );
+}
+
+interface ChatUIProps {
+  messages: import("@/types").ChatMessage[];
+  isConnected: boolean;
+  isProcessing: boolean;
+  /** The summary in flight, drawn above the composer. Null when none is. */
+  compacting: Compaction | null;
+  /** A window with no room for a summary, drawn in its place. Null when there is. */
+  compactionImpossible: Compaction | null;
+  /** True while a turn whose socket went away is unresolved. See `InterruptedNotice`. */
+  interrupted?: boolean;
+  /** True while such a turn's answer is still coming and the reader has moved on. */
+  detachedTurnPending?: boolean;
+  /** Read the transcript again, for the notice above. */
+  onRecheck?: () => void;
+  /** The agent's personal MCP services this person cannot reach, drawn as a card with the button that connects one. */
+  personalGaps: PersonalServiceGap[];
+  /** What the last turn cost, drawn under the input. Null until one has run. */
+  lastUsage: TurnUsage | null;
+  /** What the whole thread has cost, from the server. Null until a transcript loads. */
+  conversationCost: ConversationCost | null;
+  /** The window the context gauge is a share of, or null when nobody knows it. */
+  contextWindow: number | null;
+  /** The selected agent's published model, shown as current in the model picker. */
+  agentModel: PublishedModel | null;
+  /**
+   * The turn's delegations, drawn under the transcript.
+   *
+   * Under it rather than inside the assistant message, and they outlive the turn's
+   * `complete` - a background delegation reports after the parent has answered.
+   */
+  delegations: Delegation[];
+  /** The turn's browses, for the live preview panel. See `BrowserPanel`. */
+  browses: Browse[];
+  /** The conversation the file panel reads, or null before one exists. */
+  conversationId: string | null;
+  /**
+   * How many turns have finished. Bumped so the file panel re-reads when the
+   * files could have changed, rather than polling for a change it can be told
+   * about.
+   */
+  turns: number;
+  /** What people attached, for the file panel to list beside the agent's own. */
+  attachments: ChatMessageFile[];
+  /** True while a saved conversation is being loaded - show a skeleton, not empty state. */
+  isLoadingConversation?: boolean;
+  /** True for an archived conversation - the composer is closed with a notice. */
+  isArchived?: boolean;
+  sendMessage: (
+    content: string,
+    fileIds?: string[],
+    files?: import("@/types").ChatMessageFile[],
+  ) => void;
+  onModelProfileChange?: (profileId: string | null) => void;
+  onApprovalModeChange?: (mode: import("./chat-controls").ApprovalMode) => void;
+  onRegenerate?: (messageId: string) => void;
+  slashContext?: import("./slash-commands").SlashCommandContext;
+  slashCommands?: import("./slash-commands").SlashCommand[];
+  queuedMessages?: import("@/hooks/use-chat").QueuedMessage[];
+  onCancelQueued?: (id: string) => void;
+  messagesEndRef: React.RefObject<HTMLDivElement | null>;
+  /** The transcript's content, whose growth the scroller follows. */
+  transcriptRef: React.RefObject<HTMLDivElement | null>;
+  scrollContainerRef: React.RefObject<HTMLDivElement | null>;
+  pendingApproval?: PendingApproval | null;
+  onResumeDecisions?: (decisions: Decision[]) => void;
+  pendingQuestions?: AskUserQuestion[] | null;
+  onAnswerQuestions?: (answers: AskUserAnswer[]) => void;
+  /** The service a paused run waits for the person to connect. */
+  pendingConnection?: ConnectionRequest | null;
+  onConnectionResponse?: (connected: boolean) => void;
+  onStop?: () => void;
+}
+
+function ChatUI({
+  messages,
+  isConnected,
+  isProcessing,
+  compacting,
+  compactionImpossible,
+  interrupted = false,
+  detachedTurnPending = false,
+  onRecheck,
+  personalGaps,
+  lastUsage,
+  conversationCost,
+  contextWindow,
+  agentModel,
+  delegations,
+  browses,
+  conversationId,
+  turns,
+  attachments,
+  isLoadingConversation,
+  isArchived,
+  sendMessage,
+  onModelProfileChange,
+  onApprovalModeChange,
+  onRegenerate,
+  slashContext,
+  slashCommands,
+  queuedMessages,
+  onCancelQueued,
+  messagesEndRef,
+  transcriptRef,
+  scrollContainerRef,
+  pendingApproval,
+  onResumeDecisions,
+  pendingQuestions,
+  onAnswerQuestions,
+  pendingConnection,
+  onConnectionResponse,
+  onStop,
+}: ChatUIProps) {
+  const t = useTranslations("chat");
+  // Opened by the composer's microphone button; the glow around the box reads
+  // its level. See `VoiceGlow` for why it is a second capture.
+  const mic = useMicrophone();
+  const [composerFocused, setComposerFocused] = useState(false);
+
+  // The rail's ticks, built from the transcript already on screen rather than
+  // from a query of its own: one list, drawn twice.
+  const { agents: knownAgents } = useAgents({ includeArchived: true });
+  const { user: authUser } = useAuthStore();
+  const agentNames = useMemo(
+    () =>
+      new Map(
+        knownAgents.map(
+          (agent) =>
+            [
+              agent.id,
+              // The slug travels with the name because the face is drawn from it.
+              // Without it the rail's card fell back to an empty seed, so every
+              // agent wore the same generated face there - and a different one
+              // from the avatar beside its own answer in the transcript.
+              { name: agent.name, slug: agent.slug, hasAvatar: agent.has_avatar },
+            ] as const,
+        ),
+      ),
+    [knownAgents],
+  );
+  const railEntries = useMemo(
+    () =>
+      messages.map((message) => ({
+        id: message.id,
+        author:
+          message.role === "user"
+            ? t("rail.you")
+            : ((message.agentId ? agentNames.get(message.agentId)?.name : undefined) ??
+              t("rail.agent")),
+        preview: (message.content ?? "").trim(),
+        isUser: message.role === "user",
+        agentId: message.role === "user" ? undefined : (message.agentId ?? undefined),
+        agentSlug:
+          message.role === "user" ? undefined : agentNames.get(message.agentId ?? "")?.slug,
+        hasAvatar: message.agentId ? agentNames.get(message.agentId)?.hasAvatar : false,
+        // A person's face is drawn from their id, an agent's from its own; the
+        // rail never has to know which, it just hands over the seed.
+        seed:
+          message.role === "user" ? (authUser?.id ?? message.id) : (message.agentId ?? message.id),
+      })),
+    [messages, agentNames, authUser, t],
+  );
+  // The same query the file panel beside the transcript makes, so the fill under the
+  // input costs nothing extra - and appears when a conversation is *opened* rather than
+  // after the next turn reports one.
+  const { workspace } = useConversationWorkspace(conversationId);
+  // The composer floats over the transcript, which means the scroll area must
+  // end where the dock begins or the last message hides behind it. The dock's height is not a constant - attachments,
+  // banners and a growing textarea all change it - so it is measured.
+  // A callback ref rather than `useRef`, because the portal has to re-render once
+  // the node exists: a ref object mutating tells React nothing.
+  // The agent's own checklist, folded out of the planning calls the transcript
+  // already carries - nothing streams a plan frame. Memoized because the fold walks
+  // every message and this component re-renders on every streaming delta.
+  const plan = useMemo(() => planProgress(messages), [messages]);
+  const [attachmentSlot, setAttachmentSlot] = useState<HTMLDivElement | null>(null);
+  const dockRef = useRef<HTMLDivElement | null>(null);
+  const [dockHeight, setDockHeight] = useState(0);
+  useLayoutEffect(() => {
+    const dock = dockRef.current;
+    if (!dock) return;
+    const observer = new ResizeObserver(() => setDockHeight(dock.offsetHeight));
+    observer.observe(dock);
+    setDockHeight(dock.offsetHeight);
+    return () => observer.disconnect();
+  }, []);
+  return (
+    <div className="flex h-full w-full">
+      {/* The column no longer carries the width. The scroller does, and the
+          content is centred inside it - so the scrollbar sits at the edge of the
+          pane where a scrollbar belongs, rather than a hundred pixels to the
+          right of the text with white on both sides of it. */}
+      <div className="relative flex h-full min-w-0 flex-1 flex-col">
+        <TurnRail entries={railEntries} />
+        <div
+          ref={scrollContainerRef}
+          className="flex-1 scrollbar-thin overflow-y-auto"
+          style={{ paddingBottom: dockHeight }}
+        >
+          <div ref={transcriptRef} className="mx-auto max-w-5xl px-2 py-4 sm:px-4 sm:py-6">
+            {isLoadingConversation ? (
+              <ConversationSkeleton />
+            ) : messages.length === 0 ? (
+              <div className="flex h-full items-center">
+                <ChatEmptyState onPick={(prompt) => sendMessage(prompt)} />
+              </div>
+            ) : (
+              <MessageList messages={messages} onRegenerate={onRegenerate} />
+            )}
+            {/* After the transcript, not inside it: a delegation is a second agent's
+                conversation happening inside one turn of this one, and it can still be
+                streaming when the turn it belongs to has already answered. */}
+            <DelegationPanels delegations={delegations} />
+            {/* One card per browse, in the transcript, aligned to the message
+                column. An agent asked to compare two pages browses both at
+                once, and a single card would hide half of what it is doing. */}
+            <BrowserCards browses={browses} />
+            <div ref={messagesEndRef} />
+          </div>
+        </div>
+        {/* The floating dock: banners, the composer, the caption. Over the
+            transcript, not under it. `pointer-events-none` on the wrapper so
+            the transparent gutters beside the column do not swallow clicks and
+            the scrollbar's bottom stays draggable; each child takes its own
+            pointer-events back. */}
+        {/* z-20: a message avatar carries z-10 of its own, and without a higher
+            index here it rides over the composer instead of passing behind
+            it - which, now that the composer is opaque, is the difference
+            between a message sliding under the dock and one drawn on top of
+            it. */}
+        <div ref={dockRef} className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
+          {personalGaps.length > 0 && (
+            <div className="pointer-events-auto mx-auto w-full max-w-5xl px-2 pb-2 sm:px-4 sm:pb-2">
+              <ConnectServicesCard gaps={personalGaps} />
+            </div>
+          )}
+          {pendingApproval && onResumeDecisions && (
+            <div className="pointer-events-auto mx-auto w-full max-w-5xl px-2 pb-2 sm:px-4 sm:pb-2">
+              <ToolApprovalDialog
+                actionRequests={pendingApproval.actionRequests}
+                reviewConfigs={pendingApproval.reviewConfigs}
+                onDecisions={onResumeDecisions}
+                disabled={!isConnected}
+              />
+            </div>
+          )}
+          {pendingConnection && onConnectionResponse && (
+            <div className="pointer-events-auto mx-auto w-full max-w-5xl px-2 pb-2 sm:px-4 sm:pb-2">
+              <ConnectAccountPrompt
+                request={pendingConnection}
+                disabled={!isConnected}
+                onRespond={onConnectionResponse}
+              />
+            </div>
+          )}
+          {pendingQuestions && pendingQuestions.length > 0 && onAnswerQuestions && (
+            <div className="pointer-events-auto mx-auto w-full max-w-5xl px-2 pb-2 sm:px-4 sm:pb-2">
+              <QuestionPrompt
+                questions={pendingQuestions}
+                disabled={!isConnected}
+                onComplete={onAnswerQuestions}
+              />
+            </div>
+          )}
+          <div className="pointer-events-auto mx-auto w-full max-w-5xl px-2 pb-2 sm:px-4 sm:pb-4">
+            <InterruptedNotice
+              interrupted={interrupted}
+              detached={detachedTurnPending}
+              onRecheck={onRecheck}
+            />
+            <CompactionNotice compacting={compacting} impossible={compactionImpossible} />
+            {queuedMessages && queuedMessages.length > 0 && onCancelQueued && (
+              <PendingMessages messages={queuedMessages} onCancel={onCancelQueued} />
+            )}
+            {/* The checklist the agent is working to. Here rather than in the
+                transcript because a plan is written in one turn and worked through
+                over the next several: as a step it scrolls away under the work it
+                describes, and what somebody wants is where the agent is now. */}
+            <PlanStrip plan={plan} />
+            {/* What is attached, above the composer rather than inside it. The
+                slot is here because the box below is drawn here; `ChatInput`
+                portals its row into it and keeps the upload state. */}
+            <div ref={setAttachmentSlot} />
+            {/* `@container`, so the composer and the line under it change shape
+                on their own width rather than on the window's. They are not the
+                same question: at 900px with the conversation list open this box
+                is 360px wide, and a viewport breakpoint showed a reading there
+                that had nowhere to go. */}
+            <div className="@container">
+              {/* Around the whole composer, not around a row inside it: the glow
+                blooms outward from the edge it is given, and given an inner row
+                it bloomed into the card's own fill and was all but invisible.
+                Always mounted and always lit - at rest it breathes, on a voice
+                it rises with the level, and while the answer is being thought
+                through it sweeps. */}
+              {/* Lit only while the microphone is actually open. At rest it is a
+                glow with nothing to report, and during a turn the transcript
+                already says what is happening. */}
+              <VoiceGlow stream={mic.stream} active={mic.state === "live"} borderRadius={16}>
+                {/* All the way around the composer, and only while somebody is in
+                  it. A border that glows permanently is decoration; one that
+                  lights when the caret arrives is the box saying it is where
+                  the typing goes. The glow outside it answers the microphone
+                  and the turn; this is the box's own. */}
+                <Beam
+                  size="md"
+                  borderRadius={16}
+                  active={composerFocused}
+                  onFocusChange={setComposerFocused}
+                >
+                  <div
+                    data-tour="chat-composer"
+                    className="panel focus-within:border-foreground/30 rounded-2xl transition-colors"
+                  >
+                    <div className="px-3 pt-3 pb-1 sm:px-4 sm:pt-4">
+                      {isArchived && (
+                        <p className="text-muted-foreground pb-2 text-center font-mono text-xs tracking-wider uppercase">
+                          {t("conversationArchived")}
+                        </p>
+                      )}
+                      {/* One row of actions under the text, the same at every
+                          level of every limit: attach and who answers on the left;
+                          usage, the model, the microphone and send on the right. A
+                          limit near its end changes an icon's colour and never
+                          costs the row a button. */}
+                      <ChatInput
+                        onSend={sendMessage}
+                        disabled={
+                          !isConnected ||
+                          isArchived ||
+                          !!pendingApproval ||
+                          !!(pendingQuestions && pendingQuestions.length)
+                        }
+                        isProcessing={isProcessing}
+                        onStop={onStop}
+                        slashContext={slashContext}
+                        commands={slashCommands}
+                        attachmentSlot={attachmentSlot}
+                        mic={mic}
+                        // Who answers first and largest: it is the most
+                        // consequential choice in the composer.
+                        controlsSlot={<AgentPicker />}
+                        actionsSlot={
+                          <>
+                            <UsageMeter
+                              usage={lastUsage}
+                              workspace={workspace}
+                              total={conversationCost}
+                              contextWindow={contextWindow}
+                            />
+                            <div data-tour="chat-model-picker">
+                              <ChatControls
+                                onModelProfileChange={onModelProfileChange}
+                                onApprovalModeChange={onApprovalModeChange}
+                                agentModel={agentModel}
+                              />
+                            </div>
+                          </>
+                        }
+                      />
+                    </div>
+                  </div>
+                </Beam>
+              </VoiceGlow>
+              <ComposerStatus isConnected={isConnected} />
+            </div>
+          </div>
+        </div>
+      </div>
+      <FilePreviewDialog />
+      <SourcesPanel />
+      {/* The card's expansion: a resizable window over the conversation, for
+          when the thumbnail is too small to read. Draws nothing until somebody
+          opens it, so a conversation with no browsing costs nothing. */}
+      <BrowserPanel browses={browses} />
+      {/* Beside the transcript rather than under it: what the agent is holding is
+          something you glance at while reading, and a list that pushed the input
+          down would move the box you are typing in. Closed by default - it is a
+          button in the corner until somebody opens it, because a permanent third
+          column took space from every conversation including the ones where the
+          agent keeps nothing, so closed it is a strip holding one icon. Hidden on a
+          narrow screen, where there is no room for either, and absent entirely for
+          an agent with no workspace. */}
+      <div className="hidden lg:block">
+        <WorkspaceFiles
+          conversationId={conversationId}
+          revision={turns}
+          attachments={attachments}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ConversationSkeleton() {
+  // Two faux message bubbles - left (assistant) and right (user) - at the rough
+  // proportions a real exchange has, so the layout doesn't pop when messages
+  // arrive. Just enough motion to signal "loading", no shimmer chrome.
+  return (
+    <div className="space-y-6 py-4 sm:py-6">
+      <div className="flex gap-2 sm:gap-4">
+        <div className="bg-foreground/10 h-8 w-8 shrink-0 animate-pulse rounded-full sm:h-9 sm:w-9" />
+        <div className="flex max-w-[85%] flex-1 flex-col gap-2">
+          <div className="bg-foreground/10 h-4 w-1/3 animate-pulse rounded-md" />
+          <div className="bg-foreground/8 h-4 w-4/5 animate-pulse rounded-md" />
+          <div className="bg-foreground/8 h-4 w-2/3 animate-pulse rounded-md" />
+        </div>
+      </div>
+      <div className="flex flex-row-reverse gap-2 sm:gap-4">
+        <div className="bg-foreground/10 h-8 w-8 shrink-0 animate-pulse rounded-full sm:h-9 sm:w-9" />
+        <div className="flex max-w-[85%] flex-1 flex-col items-end gap-2">
+          <div className="bg-foreground/10 h-4 w-1/4 animate-pulse rounded-md" />
+          <div className="bg-foreground/8 h-4 w-3/5 animate-pulse rounded-md" />
+        </div>
+      </div>
+      <div className="flex gap-2 sm:gap-4">
+        <div className="bg-foreground/10 h-8 w-8 shrink-0 animate-pulse rounded-full sm:h-9 sm:w-9" />
+        <div className="flex max-w-[85%] flex-1 flex-col gap-2">
+          <div className="bg-foreground/8 h-4 w-3/4 animate-pulse rounded-md" />
+          <div className="bg-foreground/8 h-4 w-1/2 animate-pulse rounded-md" />
+        </div>
+      </div>
+    </div>
+  );
+}

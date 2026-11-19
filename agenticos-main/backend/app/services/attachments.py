@@ -1,0 +1,659 @@
+"""What happens to a file somebody attaches to a message.
+
+Before a workspace existed there was one answer: parse it and paste the text
+into the user's message. That works, and it costs the file's full token weight
+on *every turn of the conversation, forever* - the model re-reads a two-hundred
+page report to answer "and what about March". A fifty-megabyte CSV cannot be
+attached at all.
+
+With a workspace there is a better answer: put the file where the agent can
+reach it, and give the model a reference plus enough of a head to decide whether
+reading it is worth a tool call. The file stops being context and becomes data.
+
+Images are the exception that keeps both paths. The model must still *see* the
+picture - that is what multimodal models are for and a path string is not a
+substitute - and it must also be able to act on it, which needs bytes on a
+filesystem. So an image goes both ways, up to a ceiling past which paying for
+the bytes twice stops being worth it.
+"""
+
+from __future__ import annotations
+
+import functools
+import logging
+import re
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+from typing import Any
+from uuid import UUID
+
+from pydantic_ai.messages import BinaryContent
+from pydantic_ai.workspaces import Workspace, WorkspaceError
+
+from app.core.blocking import run_blocking
+from app.core.config import settings
+from app.db.models.chat_file import ChatFile
+from app.services.file_storage import get_file_storage
+from app.services.file_upload import TiffConversion, cap_text, tiff_pages_to_png
+
+logger = logging.getLogger(__name__)
+
+_TIFF_MIME = "image/tiff"
+"""A canonical TIFF is converted to PNG for the model; anything else typed `image`
+is one of the four web-safe rasters the vision APIs take as-is. Keyed on the
+*resolved* MIME (stored canonical), so a legacy `application/octet-stream` row is
+served as a download rather than mis-converted."""
+
+_TEXT_BEARING = {"pdf", "docx", "spreadsheet", "document", "presentation", "email"}
+"""File types whose extracted text is worth writing beside the original."""
+
+_LIT_READABLE = {"pdf", "docx", "spreadsheet", "document", "presentation"}
+"""What a `lit`-carrying runtime reads itself, so the sibling is redundant there.
+`email` is deliberately absent: `lit` cannot read a `.msg`, so it always gets one."""
+
+UPLOAD_DIR = "uploads"
+"""Where attachments land, **relative to the workspace's working directory**.
+
+One directory, so `ls uploads` answers "what was I given" without the agent
+guessing at a layout. Relative because absolute was wrong in a way nothing
+reported: a sandbox resolves an absolute path as absolute, so `/uploads/x`
+landed at the container's filesystem root - outside the bind-mounted work
+directory. The agent's `ls` did not see it, the workspace browser reads the host
+directory and so could not list it, and the file died with the container while
+everything under the work directory survived. An agent asked to read an
+attachment answered that the directory was empty, having summarised the file
+from the head sample in its own prompt (#1039).
+"""
+
+HEAD_LINES = 20
+"""How much of a text file the reference shows.
+
+Enough for the model to tell a sales export from a log, and to know the column
+names - which is what it needs to decide whether to read the rest. More would
+start being the paste this exists to replace.
+"""
+
+HEAD_CHARS = 2000
+"""A second bound, for a file whose twenty lines are one long line each."""
+
+_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+_DOT_RUN = re.compile(r"\.{2,}")
+
+
+@dataclass(frozen=True)
+class AttachmentPlan:
+    """What one attached file contributes to the turn."""
+
+    reference: str | None
+    """The text describing it, appended to the user's message."""
+
+    inline: list[BinaryContent]
+    """Bytes the model should see directly, when it can and should. A list because
+    a multi-page TIFF becomes one PNG per page; the single-image and no-image cases
+    are a one- and a zero-element list."""
+
+    refused: bool = False
+    """Whether the workspace would not take this file.
+
+    Carried on the plan rather than inferred from the reference's wording, so the
+    turn can say once that the workspace is unavailable - see `_WORKSPACE_REFUSED`.
+    """
+
+
+@dataclass(frozen=True)
+class InlineResult:
+    """The image(s) an attachment contributes, plus any note about what was left out.
+
+    The page-count facts live only inside the TIFF conversion, but the reference is
+    built separately by `_referenced`/`_pasted`, so the note is threaded across on
+    the result rather than lost (#1591, §8 finding F)."""
+
+    images: list[BinaryContent]
+    note: str | None = None
+
+
+_WORKSPACE_REFUSED = (
+    "\n---\nYour workspace would not accept a write this turn. If the shell or the "
+    "file tools fail as well, the workspace is unavailable - that is not a fault in "
+    "the command you wrote, and another attempt will fail the same way. Answer from "
+    "what is in this message, and say plainly that the workspace could not be "
+    "reached."
+)
+"""One sentence about the machine, where every other line is about a file."""
+
+
+def is_attachment(path: str) -> bool:
+    """Whether a workspace path is a file a person attached.
+
+    `uploads/` is this application's own convention - `workspace_path` below puts
+    every attachment there - and it is the only signal available: a host records no
+    author, and neither does the state document. So this is a fact about *where* a
+    file is, stated as what that placement means.
+
+    Which also names its one limit. An agent that writes into `uploads/` itself is
+    indistinguishable from a person who attached something, and nothing stops it.
+    The alternative is a table mapping every path to whoever wrote it, which is a
+    row per file per workspace to answer a question a directory already answers.
+    """
+    return PurePosixPath(path.lstrip("/")).parts[:1] == (UPLOAD_DIR,)
+
+
+def workspace_path(chat_file: ChatFile) -> str:
+    """Where this file lives in the workspace, derived from the file itself.
+
+    The id goes in the name rather than into a mapping table, and that one
+    choice buys two properties. Two files called `report.csv` cannot overwrite
+    each other, and re-attaching the same file on a later turn resolves to the
+    same path - so the write is skipped rather than repeated, which is the
+    difference between an upload costing one write and costing one per turn for
+    the rest of the conversation.
+    """
+    return f"{UPLOAD_DIR}/{chat_file.id.hex[:8]}-{safe_name(chat_file.filename)}"
+
+
+def safe_name(filename: str) -> str:
+    """A filename that cannot escape the uploads directory.
+
+    The name is whatever the user's operating system allowed, which includes
+    `../`, a leading dash and a thousand characters. Sanitised rather than
+    rejected: the file is fine, only its name is hostile.
+
+    Separators are already gone once the allowed alphabet is applied, so a run
+    of dots cannot traverse anything. It is collapsed anyway: `_.._etc_passwd`
+    is safe here and stops being obviously safe the moment somebody downstream
+    splits a path differently, and the cost of not having to think about that
+    again is one substitution.
+    """
+    cleaned = _DOT_RUN.sub("_", _UNSAFE.sub("_", filename.strip())).lstrip("._-")
+    return cleaned[:96] or "attachment"
+
+
+def _head(text: str) -> str:
+    return "\n".join(text.splitlines()[:HEAD_LINES])[:HEAD_CHARS]
+
+
+def _size(chat_file: ChatFile) -> str:
+    if chat_file.size >= 1024 * 1024:
+        return f"{chat_file.size / (1024 * 1024):.1f} MB"
+    return f"{max(1, chat_file.size // 1024)} KB"
+
+
+def _pasted(chat_file: ChatFile) -> str:
+    """The whole file, inline. What every attachment used to get.
+
+    Capped per file at `CHAT_PROMPT_TEXT_MAX_CHARS`: this no-workspace path is the
+    only one that pastes a file's full parse into the prompt, so without a per-file
+    bound a single large attachment defeats the layered budget the setting documents
+    (the stored parse is capped at `CHAT_PARSED_TEXT_MAX_CHARS`, the turn aggregate at
+    `CHAT_TURN_TEXT_MAX_CHARS`). The marker `cap_text` leaves tells the model the rest
+    exists in the file (#1591, §7 finding 9).
+    """
+    body = cap_text(chat_file.parsed_content, settings.CHAT_PROMPT_TEXT_MAX_CHARS)
+    return f"\n---\nAttached file: {chat_file.filename}\n```\n{body}\n```"
+
+
+def _text_sibling(chat_file: ChatFile, path: str) -> str | None:
+    """Where this file's extracted text sits, when one was written beside it.
+
+    Derived from the file rather than from whether *this* turn did the writing:
+    re-attaching a file on a later turn skips the write, and a reference that only
+    named the sibling on the turn that created it would stop naming a file that is
+    still there.
+    """
+    if chat_file.file_type in _TEXT_BEARING and chat_file.parsed_content:
+        return f"{path}.txt"
+    return None
+
+
+def _referenced(chat_file: ChatFile, path: str, *, sibling: str | None) -> str:
+    """What the model is told about a file that is in its workspace.
+
+    **The path is a sentence, not a parenthesis.** It read
+    `report.pdf (uploads/8b1e-report.pdf, 280 KB, pdf)` - the path one of three
+    facts in a bracket - and a model skimming that answered "the directory is
+    empty" after one `ls`, on a file it had summarised a turn earlier. Where it is
+    gets its own clause (#1039).
+
+    **The extracted text is named only where it is there.** A PDF, a `.docx` and a
+    spreadsheet used to get a `.txt` of the parse beside them unconditionally,
+    which on a runtime carrying `lit` is a second copy of the file's contents on
+    disk to save the agent a tool call it should be making. So it is written only
+    where the workspace cannot read the original itself - and *named* only where
+    the write actually landed, which is a different question again: the second
+    write can be refused by a document with no room left for it, and a model told
+    about a file that is not there has twenty lines of prompt and a binary it
+    cannot parse. The caller asks the workspace - see `_sibling_present`.
+    """
+    parts = [
+        f"\n---\nAttached file: {chat_file.filename} "
+        f"({_size(chat_file)}, {chat_file.file_type}), "
+        f"in your workspace at {path}"
+    ]
+    if sibling is not None:
+        parts.append(f"\nIts text, extracted for you, is beside it at {sibling}")
+    if chat_file.parsed_content:
+        parts.append(f"\nFirst {HEAD_LINES} lines:\n```\n{_head(chat_file.parsed_content)}\n```")
+    return "".join(parts)
+
+
+def _too_large_to_show(chat_file: ChatFile) -> str:
+    """An image past the inline ceiling, with no workspace to put it in instead.
+
+    Said rather than skipped: the person attached a picture and asked about it, so
+    silence reads as the model ignoring them. Naming the limit is what tells them
+    the fix is a smaller image rather than a better question.
+    """
+    return (
+        f"\n---\nAttached image: {chat_file.filename} ({_size(chat_file)}) - too large "
+        "to show, and this agent has no workspace to read it from. Attach a smaller "
+        "version, or give the agent the Files & shell capability."
+    )
+
+
+def _unstored(chat_file: ChatFile) -> str:
+    """Named and sampled, with no path offered because there is nothing at one.
+
+    **It says what happened and not why**, which it used to get wrong in the one
+    way that matters. The sentence read "too large for the workspace", reasoned
+    from the `state` backend's four-megabyte document - and a container write
+    fails for reasons that have nothing to do with size: an unreachable host
+    answers `could not write 'uploads/x.pdf'`, worded identically to a refusal. So
+    a 782 KB PDF attached while `sandboxd` was down was reported to the model as
+    too large, the model repeated that to the person who attached it, and the two
+    of them spent a conversation on a size limit that was never the problem. The
+    real error is in the `attachment_not_written` log line beside the caller.
+
+    Never `_pasted`. A file the workspace would not take is not a file to put in a
+    prompt: with a 50 MB upload limit against a 4 MB document, that is up to fifty
+    megabytes of text in one message. The head is the usable part.
+
+    And no path, because the write failed: naming one the agent cannot open would
+    cost it a tool call to discover a file that is not there.
+    """
+    parts = [
+        f"\n---\nAttached file: {chat_file.filename} "
+        f"({_size(chat_file)}, {chat_file.file_type}) - it could not be written to "
+        "your workspace, so there is no file to open. Do not guess at why"
+    ]
+    if chat_file.parsed_content:
+        parts.append(f"\nFirst {HEAD_LINES} lines:\n```\n{_head(chat_file.parsed_content)}\n```")
+    return "".join(parts)
+
+
+def _unreadable(chat_file: ChatFile) -> str:
+    """A file no parser could read, with no workspace to open it from.
+
+    Said rather than skipped, the same principle as `_too_large_to_show`: the
+    person attached a file and asked about it, so an empty prompt reads as the
+    model denying the file the transcript says arrived. There is nothing to
+    sample and no path to give, so the model is told what came and why it cannot
+    be opened.
+    """
+    return (
+        f"\n---\nAttached file: {chat_file.filename} "
+        f"({_size(chat_file)}, {chat_file.file_type}) - its text could not be extracted, "
+        "and this agent has no workspace to open it from."
+    )
+
+
+def _unprocessable(chat_file: ChatFile) -> str:
+    """Named when routing the file raised, so the turn survives but the model is
+    not left denying it.
+
+    The error's own text stays in the `logger.warning` beside the raise; the
+    model is told only that the file arrived and could not be processed, which is
+    all it can honestly say about it.
+    """
+    return (
+        f"\n---\nAttached file: {chat_file.filename} "
+        f"({_size(chat_file)}, {chat_file.file_type}) - it arrived but could not be "
+        "processed, so its contents are unavailable."
+    )
+
+
+_TURN_TRUNCATED = (
+    "\n---\nFurther attached text was omitted: the files on this turn exceeded the "
+    "size budget. Ask about a specific file to have its full text pulled in."
+)
+"""Said once when the per-turn text budget (`CHAT_TURN_TEXT_MAX_CHARS`) is reached,
+so several large attachments in one turn cannot compound past it."""
+
+
+def _inline_budget_spent(chat_file: ChatFile) -> str:
+    """This turn has no room left to show another image, and says so once.
+
+    The model is told rather than left to wonder why an attachment it can see
+    named is not in front of it - and it still has the path, so it can read the
+    file deliberately if the answer needs it.
+    """
+    return (
+        f"\n---\nAttached image: {chat_file.filename} ({_size(chat_file)}) - not shown "
+        "inline: this turn has already reached the limit on how much image data it "
+        "can carry."
+    )
+
+
+def _tiff_unshowable(chat_file: ChatFile) -> str:
+    """A TIFF that yielded no usable page - a bomb, or every page over the cap."""
+    return (
+        f"\n---\nAttached image: {chat_file.filename} ({_size(chat_file)}) - it could "
+        "not be converted to an image the model can view."
+    )
+
+
+def _tiff_note(chat_file: ChatFile, conversion: TiffConversion) -> str | None:
+    """The note about omitted TIFF pages, or `None` when every page was shown.
+
+    Names the total only when it is *safely* known (the sequence was exhausted); a
+    bounded stop that never walked the whole IFD chain says only that pages were
+    omitted (#1591, §7 finding 5)."""
+    if not conversion.omitted:
+        return None
+    shown = len(conversion.images)
+    if conversion.total is not None:
+        return (
+            f"\n(Showing {shown} of {conversion.total} pages of {chat_file.filename}; "
+            "the rest are in the original.)"
+        )
+    return (
+        f"\n(Showing the first {shown} pages of {chat_file.filename}; additional pages "
+        "were omitted.)"
+    )
+
+
+class AttachmentRouter:
+    """Turns attached files into a prompt, and into files an agent can open.
+
+    One object for every surface. The WebSocket built this inline and no other
+    surface had it at all, so an attachment meant something different depending
+    on where the person was sitting - and the workspace would have made that
+    three different things.
+    """
+
+    def __init__(
+        self,
+        workspace: Workspace | None = None,
+        *,
+        can_parse: bool = False,
+    ) -> None:
+        self._workspace = workspace
+        # Whether the workspace can read a PDF, a `.docx` or a spreadsheet *itself*.
+        # True only for a runtime this deployment describes, which is the same
+        # condition as having told the model it has `lit` - so the caller passes
+        # `workspace.briefing is not None` rather than guessing from the backend
+        # kind. A `state` workspace is files with no shell; a Daytona sandbox and
+        # somebody's own runtime carry whatever their image carries.
+        self._can_parse = can_parse
+
+    async def build_prompt(self, user_message: str, files: list[ChatFile]) -> str | list[Any]:
+        """The user's message, with everything they attached folded in."""
+        if not files:
+            return user_message
+
+        text_parts: list[str] = []
+        inline: list[BinaryContent] = []
+        refused = False
+        # The per-turn text budget. The no-workspace path pastes each file's full
+        # parsed text, so several large attachments in one turn compound past any
+        # per-file cap; the running total is bounded here and said once (#1591,
+        # §7 finding 8). Only the reference text is counted - the inline images are
+        # bounded by their own per-image caps.
+        budget = settings.CHAT_TURN_TEXT_MAX_CHARS
+        used = 0
+        truncated = False
+        # The same idea for the images, in bytes. A per-file cap bounds one
+        # attachment; nothing bounded a turn carrying several, and a TIFF alone
+        # can reach fifty megabytes at the defaults (#1591 review).
+        inline_budget = settings.CHAT_TURN_INLINE_MAX_BYTES
+        for chat_file in files:
+            plan = await self.route(chat_file, inline_budget=inline_budget)
+            refused = refused or plan.refused
+            if plan.inline:
+                inline.extend(plan.inline)
+                inline_budget -= sum(len(part.data) for part in plan.inline)
+            if plan.reference and not truncated:
+                remaining = budget - used
+                if len(plan.reference) <= remaining:
+                    text_parts.append(plan.reference)
+                    used += len(plan.reference)
+                else:
+                    # The whole reference is dropped rather than sliced: a
+                    # reference is a formatted block - a filename clause, a
+                    # workspace path, a fenced extract - and cutting it mid-way
+                    # loses the closing code fence, so the truncation notice that
+                    # follows lands *inside* the file's code block and the model
+                    # reads it as file contents (#1591).
+                    text_parts.append(_TURN_TRUNCATED)
+                    truncated = True
+
+        # **Said once, about the workspace, not once per file.** A run whose
+        # workspace will not take a write is a run whose shell and file tools will
+        # not work either, and nothing told the model that: it read each failure as
+        # a problem with the command it had just written and kept trying - in one
+        # conversation `ls`, then a `curl` of a `data:` URI, then three workarounds
+        # offered to the person, across two turns and 57k tokens (#1046).
+        if refused and self._workspace is not None:
+            text_parts.append(_WORKSPACE_REFUSED)
+
+        full_text = user_message + "".join(text_parts)
+        if inline:
+            return [full_text, *inline]
+        return full_text
+
+    async def route(
+        self, chat_file: ChatFile, *, inline_budget: int | None = None
+    ) -> AttachmentPlan:
+        """Where one file goes, and what the model is told about it.
+
+        A file that cannot be loaded is skipped rather than failing the turn:
+        the user asked a question and attached something, and answering without
+        the attachment beats not answering.
+        """
+        try:
+            return await self._route(chat_file, inline_budget)
+        except Exception:
+            logger.warning(
+                "attachment_routing_failed", extra={"file_id": str(chat_file.id)}, exc_info=True
+            )
+            return AttachmentPlan(reference=_unprocessable(chat_file), inline=[])
+
+    async def _route(self, chat_file: ChatFile, inline_budget: int | None) -> AttachmentPlan:
+        workspace = self._workspace
+        if workspace is None:
+            return await self._without_workspace(chat_file, inline_budget)
+        return await self._into_workspace(workspace, chat_file, inline_budget)
+
+    async def _without_workspace(
+        self, chat_file: ChatFile, inline_budget: int | None = None
+    ) -> AttachmentPlan:
+        """What an agent with nowhere to put files gets.
+
+        The image ceiling applies here too. It used not to: this path inlined an
+        image of any size while `_inline_images` beside it honoured
+        `SANDBOX_INLINE_IMAGE_MAX_BYTES`, so the same 40 MB screenshot was refused
+        by an agent *with* a workspace and loaded whole by one without - the wrong
+        way round, since the one with a workspace has a path to offer instead and
+        this one has nothing to fall back to.
+
+        Past the ceiling the model is told the picture is there and too large,
+        rather than being sent it or being told nothing. There is no path to give,
+        so a person asking "what is in this screenshot" gets an answer about why it
+        cannot be looked at instead of silence.
+        """
+        if chat_file.file_type == "image":
+            result = await self._inline_images(chat_file, None, inline_budget)
+            if result.images:
+                return AttachmentPlan(reference=result.note, inline=result.images)
+            # No image: a TIFF whose pages could not be shown carries its own note;
+            # a web-safe image past the inline ceiling is the too-large case.
+            if result.note is not None:
+                return AttachmentPlan(reference=result.note, inline=[])
+            return AttachmentPlan(reference=_too_large_to_show(chat_file), inline=[])
+        if chat_file.parsed_content:
+            return AttachmentPlan(reference=_pasted(chat_file), inline=[])
+        return AttachmentPlan(reference=_unreadable(chat_file), inline=[])
+
+    async def _into_workspace(
+        self,
+        workspace: Workspace,
+        chat_file: ChatFile,
+        inline_budget: int | None = None,
+    ) -> AttachmentPlan:
+        path = workspace_path(chat_file)
+        data: bytes | None = None
+
+        if not await workspace.exists(path):
+            data = await get_file_storage().load(chat_file.storage_path)
+            try:
+                await workspace.write_bytes(path, data)
+            except (OSError, WorkspaceError) as refused:
+                # A full workspace, most likely - and that is exactly why this
+                # must not fall back to pasting the file. The write is refused
+                # when the document has no room for it, so this branch only ever
+                # runs for a file too large to store; with a 50 MB upload limit
+                # against a 4 MB document, pasting it would have put up to fifty
+                # megabytes of text into one message. A file small enough to paste
+                # safely would have fitted in the workspace.
+                #
+                # An image is the exception, and the reason is the same one that
+                # makes images go both ways: the model can still *see* it, and
+                # `_inline_images` has its own, much smaller per-image ceiling.
+                logger.info("attachment_not_written", extra={"path": path, "reason": str(refused)})
+                if chat_file.file_type == "image":
+                    plan = await self._without_workspace(chat_file)
+                    return AttachmentPlan(
+                        reference=plan.reference, inline=plan.inline, refused=True
+                    )
+                return AttachmentPlan(reference=_unstored(chat_file), inline=[], refused=True)
+
+            await self._write_extracted_text(workspace, chat_file, path)
+
+        sibling = await self._sibling_present(workspace, chat_file, path)
+        reference = _referenced(chat_file, path, sibling=sibling)
+        if chat_file.file_type != "image":
+            return AttachmentPlan(reference=reference, inline=[])
+        result = await self._inline_images(chat_file, data, inline_budget)
+        if result.note is not None:
+            reference += result.note
+        return AttachmentPlan(reference=reference, inline=result.images)
+
+    async def _sibling_present(
+        self, workspace: Workspace, chat_file: ChatFile, path: str
+    ) -> str | None:
+        """The extracted text beside the original, where the workspace really has it.
+
+        Asked rather than assumed, and that is the whole point: the write above can
+        be refused - a document with room for a 3 MB spreadsheet and not for its
+        parse - and the file may equally be there from an earlier turn, because
+        re-attaching writes nothing. Both cases are answered by asking, which the
+        one round trip is worth: naming a file that is not there costs the model a
+        tool call to discover it and leaves it with the head sample.
+        """
+        if self._skips_sibling(chat_file):
+            return None
+        sibling = _text_sibling(chat_file, path)
+        if sibling is None:
+            return None
+        return sibling if await workspace.exists(sibling) else None
+
+    def _skips_sibling(self, chat_file: ChatFile) -> bool:
+        """Whether the extracted-text sibling is redundant for this file.
+
+        Only where the runtime carries `lit` *and* `lit` can read the format
+        itself. An `email` (`.msg`) is never skipped: `lit` reads office documents
+        but not Outlook messages, so its extracted text is the only readable form
+        (#1591, §5 #7)."""
+        return self._can_parse and chat_file.file_type in _LIT_READABLE
+
+    async def _write_extracted_text(
+        self, workspace: Workspace, chat_file: ChatFile, path: str
+    ) -> None:
+        """Put the parse beside the original, for a workspace that cannot read it.
+
+        Skipped where the runtime carries `lit`, which reads a PDF, a `.docx` and a
+        spreadsheet in one command - there the sibling is a second copy of the
+        file's contents on disk to save a tool call. Written everywhere else,
+        because a `state` workspace has no shell at all and an `.xlsx` in one is a
+        zip of XML that `read_file` returns as mojibake.
+        """
+        if self._skips_sibling(chat_file):
+            return
+        sibling = _text_sibling(chat_file, path)
+        if sibling is None or not chat_file.parsed_content:
+            return
+        try:
+            await workspace.write_text(sibling, chat_file.parsed_content)
+        except (OSError, WorkspaceError) as refused:
+            # Not raised and not reported to the model here: `_sibling_present`
+            # asks the workspace what is actually there, so a refused write simply
+            # goes unnamed. The line is what tells an operator why.
+            logger.info(
+                "attachment_text_not_written", extra={"path": sibling, "reason": str(refused)}
+            )
+
+    async def _inline_images(
+        self, chat_file: ChatFile, data: bytes | None, inline_budget: int | None = None
+    ) -> InlineResult:
+        """The image(s) the model should see, and any note about what was left out.
+
+        A TIFF is converted to one PNG per page (bomb-guarded, metadata-stripped,
+        each within the per-page cap) since the vision APIs do not accept TIFF; a
+        web-safe image is sent as-is when it is inside the inline ceiling. Past the
+        ceiling a web-safe image gets no inline bytes - the model is given the path
+        and can `read_file` it deliberately, usually after resizing, the thing it
+        needed the file on disk for. TIFF is not gated on the whole-file size,
+        because each converted page is bounded on its own.
+        """
+        is_tiff = chat_file.mime_type == _TIFF_MIME
+        # What this turn has left, across every attachment on it. `None` is the
+        # standalone call - a caller routing one file on its own gets the
+        # single-file ceiling, which is what every per-file bound here already is.
+        remaining = settings.CHAT_TURN_INLINE_MAX_BYTES if inline_budget is None else inline_budget
+        if remaining <= 0:
+            return InlineResult(images=[], note=_inline_budget_spent(chat_file))
+        if not is_tiff and chat_file.size > settings.SANDBOX_INLINE_IMAGE_MAX_BYTES:
+            return InlineResult(images=[])
+        if not is_tiff and chat_file.size > remaining:
+            return InlineResult(images=[], note=_inline_budget_spent(chat_file))
+        if data is None:
+            data = await get_file_storage().load(chat_file.storage_path)
+        if is_tiff:
+            # On the file pool, not the request loop: the conversion is Pillow
+            # decode / resize / PNG-encode over up to `CHAT_TIFF_MAX_INLINE_PAGES`
+            # pages - the same blocking CPU work `parse_content` already keeps off
+            # the loop (#1108), which a direct call here reintroduced, stalling
+            # every other request on the worker for its length.
+            conversion = await run_blocking(
+                functools.partial(
+                    tiff_pages_to_png,
+                    data,
+                    max_pages=settings.CHAT_TIFF_MAX_INLINE_PAGES,
+                    max_bytes=settings.SANDBOX_INLINE_IMAGE_MAX_BYTES,
+                    max_pixels=settings.CHAT_IMAGE_MAX_PIXELS,
+                    max_total_bytes=remaining,
+                )
+            )
+            images = [BinaryContent(data=png, media_type="image/png") for png in conversion.images]
+            if not images:
+                return InlineResult(images=[], note=_tiff_unshowable(chat_file))
+            return InlineResult(images=images, note=_tiff_note(chat_file, conversion))
+        return InlineResult(images=[BinaryContent(data=data, media_type=chat_file.mime_type)])
+
+
+async def load_attached_files(db: Any, file_ids: list[str], *, user_id: UUID) -> list[ChatFile]:
+    """The rows behind the ids a client sent with its message, scoped to the sender (#706)."""
+    from app.api.deps import get_conversation_service
+
+    return await get_conversation_service(db).list_attached_files(file_ids, user_id=user_id)
+
+
+async def load_turn_attachments(
+    db: Any, message_id: UUID | None, file_ids: list[str], *, user_id: UUID
+) -> list[ChatFile]:
+    """This turn's attachments: linked to its message or the caller's own still-
+    unlinked uploads, read by id rather than by the frame's re-validated ids (#1756)."""
+    from app.api.deps import get_conversation_service
+
+    return await get_conversation_service(db).list_turn_attachments(
+        message_id, file_ids, user_id=user_id
+    )

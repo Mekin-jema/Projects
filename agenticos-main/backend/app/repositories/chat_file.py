@@ -1,0 +1,139 @@
+"""Chat file repository."""
+
+from collections.abc import Iterable
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy import update as sql_update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models.chat_file import ChatFile
+from app.db.models.conversation import Message
+
+
+async def get_by_id(db: AsyncSession, file_id: UUID) -> ChatFile | None:
+    """Get a chat file by ID."""
+    return await db.get(ChatFile, file_id)
+
+
+async def get_many(db: AsyncSession, file_ids: Iterable[UUID], *, user_id: UUID) -> list[ChatFile]:
+    """Batch-load `user_id`'s chat files by IDs.
+
+    The ids come off client payloads, and `chat_files` carries no organization,
+    so `user_id` is the only scope a row has: another user's id resolves to
+    nothing here rather than to their row (#706).
+    """
+    ids = list(file_ids)
+    if not ids:
+        return []
+    result = await db.execute(
+        select(ChatFile).where(ChatFile.id.in_(ids), ChatFile.user_id == user_id)
+    )
+    return list(result.scalars().all())
+
+
+async def get_in_conversation(
+    db: AsyncSession, file_id: UUID, *, conversation_id: UUID
+) -> ChatFile | None:
+    """One attachment, scoped to the thread whose turn it hangs on.
+
+    The scope a run review needs and `user_id` cannot give: reading a run is the
+    organization's right rather than its starter's, so a colleague holding
+    `runs:view` reads a transcript whose attachments belong to somebody else. What
+    replaces ownership is the turn - the file is admitted only where its
+    `message_id` names a message of this conversation, which is the same reach the
+    transcript route already grants.
+
+    An unlinked file (`message_id` null) is nobody's transcript and resolves to
+    nothing here: it is an upload in progress, and the only caller who should see
+    one is the person holding it.
+    """
+    result = await db.execute(
+        select(ChatFile)
+        .join(Message, Message.id == ChatFile.message_id)
+        .where(ChatFile.id == file_id, Message.conversation_id == conversation_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def link_to_message(
+    db: AsyncSession, *, message_id: UUID, file_ids: Iterable[UUID], user_id: UUID
+) -> int:
+    """Link `user_id`'s unlinked chat files to a message, answering how many moved.
+
+    The WHERE carries both halves of the rule rather than trusting the caller:
+    without them this was a blind bulk update, so a turn naming another user's
+    file id put their filename on its own message and silently pulled the file
+    off the message it already hung on (#706). An id the predicates exclude is
+    skipped here; a caller that must refuse it reads the rows first
+    (`ConversationService.link_files_to_message`) - and compares the count,
+    because a concurrent turn can take a row between that read and this UPDATE.
+    """
+    ids = list(file_ids)
+    if not ids:
+        return 0
+    result = await db.execute(
+        sql_update(ChatFile)
+        .where(
+            ChatFile.id.in_(ids),
+            ChatFile.user_id == user_id,
+            ChatFile.message_id.is_(None),
+        )
+        .values(message_id=message_id)
+    )
+    await db.flush()
+    # `execute` is typed to return `Result`, which has no `rowcount`; a DML
+    # statement actually returns `CursorResult`, which does (see resource_grant).
+    return result.rowcount  # ty: ignore[unresolved-attribute]
+
+
+async def unlinked_ids(db: AsyncSession, file_ids: Iterable[UUID]) -> set[UUID]:
+    """Of these files, the ids whose row is not yet attached to a message.
+
+    A turn's attachments are linked when the runner records its transcript - a
+    failed turn included, which persists and commits before it re-raises - so a
+    file already carrying a `message_id` belongs to a stored turn and must not be
+    swept up as an orphan (#1503). Read as a column select rather than through the
+    mapped rows: the link is a bulk UPDATE the session never saw and
+    `expire_on_commit` is off, so a loaded instance still reads `message_id` as
+    None.
+    """
+    ids = list(file_ids)
+    if not ids:
+        return set()
+    result = await db.execute(
+        select(ChatFile.id).where(ChatFile.id.in_(ids), ChatFile.message_id.is_(None))
+    )
+    return set(result.scalars().all())
+
+
+async def delete(db: AsyncSession, *, db_file: ChatFile) -> None:
+    """Delete a chat file row."""
+    await db.delete(db_file)
+    await db.flush()
+
+
+async def create(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    filename: str,
+    mime_type: str,
+    size: int,
+    storage_path: str,
+    file_type: str,
+    parsed_content: str | None = None,
+) -> ChatFile:
+    """Create a new chat file record."""
+    chat_file = ChatFile(
+        user_id=user_id,
+        filename=filename,
+        mime_type=mime_type,
+        size=size,
+        storage_path=storage_path,
+        file_type=file_type,
+        parsed_content=parsed_content,
+    )
+    db.add(chat_file)
+    await db.flush()
+    return chat_file

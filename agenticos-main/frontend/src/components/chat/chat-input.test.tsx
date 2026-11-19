@@ -1,0 +1,280 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { toast } from "sonner";
+
+import { ChatInput } from "./chat-input";
+import { PublicConfigProvider } from "@/components/public-config/public-config-provider";
+import type { FileUploadResponse } from "@/lib/file-api";
+import { DEFAULT_PUBLIC_CONFIG } from "@/lib/public-config";
+
+const state = vi.hoisted(() => ({
+  upload: vi.fn<(file: File) => Promise<FileUploadResponse>>(),
+}));
+
+vi.mock("@/lib/file-api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/file-api")>()),
+  uploadFile: (file: File) => state.upload(file),
+}));
+
+vi.mock("sonner", () => ({ toast: { error: vi.fn(), info: vi.fn() } }));
+
+vi.mock("next/image", () => ({
+  // eslint-disable-next-line @next/next/no-img-element
+  default: (props: { src: string; alt: string }) => <img src={props.src} alt={props.alt} />,
+}));
+
+function uploaded(overrides: Partial<FileUploadResponse> = {}): FileUploadResponse {
+  return {
+    id: "f-1",
+    filename: "pasted-2026-08-08.txt",
+    mime_type: "text/plain",
+    size: 50_000,
+    file_type: "text",
+    preview: "Traceback (most recent call last):",
+    ...overrides,
+  };
+}
+
+const LONG = "x".repeat(50_000);
+const CHAT_MAX_UPLOAD_SIZE_MB = DEFAULT_PUBLIC_CONFIG.chatMaxUploadSizeMb;
+
+beforeEach(() => {
+  state.upload.mockReset();
+  state.upload.mockResolvedValue(uploaded());
+  // The toast mock is module-level, so without this a refusal asserted in one
+  // test is still recorded in the next one that asserts none.
+  vi.mocked(toast.error).mockClear();
+  vi.mocked(toast.info).mockClear();
+});
+
+describe("ChatInput paste", () => {
+  it("turns a long paste into an attachment and leaves the composer empty", async () => {
+    // The point of the whole feature: the question somebody is about to type has
+    // to still fit on the screen after they paste the thing it is about.
+    render(<ChatInput onSend={vi.fn()} />);
+    const textarea = screen.getByRole("textbox");
+
+    await userEvent.click(textarea);
+    await userEvent.paste(LONG);
+
+    expect(await screen.findByText("pasted-2026-08-08.txt")).toBeVisible();
+    expect(screen.getByText("Pasted · 48.8 KB")).toBeVisible();
+    expect(textarea).toHaveValue("");
+  });
+
+  it("uploads the paste as a text file, which is what the agent can then read", async () => {
+    render(<ChatInput onSend={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("textbox"));
+    await userEvent.paste(LONG);
+
+    await waitFor(() => expect(state.upload).toHaveBeenCalledOnce());
+    const file = state.upload.mock.calls[0]![0];
+    expect(file.type).toBe("text/plain");
+    expect(file.name).toMatch(/^pasted-\d{4}-\d{2}-\d{2}\.txt$/);
+    expect(await file.text()).toBe(LONG);
+  });
+
+  it("leaves a short paste alone - somebody who pastes a paragraph meant to send it", async () => {
+    render(<ChatInput onSend={vi.fn()} />);
+    const textarea = screen.getByRole("textbox");
+
+    await userEvent.click(textarea);
+    await userEvent.paste("what does this error mean?");
+
+    expect(textarea).toHaveValue("what does this error mean?");
+    expect(state.upload).not.toHaveBeenCalled();
+  });
+
+  it("sends the attachment with the question typed beside it", async () => {
+    const onSend = vi.fn();
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByRole("textbox");
+
+    await userEvent.click(textarea);
+    await userEvent.paste(LONG);
+    await screen.findByText("pasted-2026-08-08.txt");
+    await userEvent.type(textarea, "why does this fail?");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(onSend).toHaveBeenCalledWith("why does this fail?", ["f-1"], [uploaded()]);
+  });
+});
+
+/**
+ * A `FileList` that empties *in place* when the input is reset, as Blink's does.
+ *
+ * This is the one browser behaviour this suite cannot get from jsdom, and the
+ * reason the picker shipped broken with every test here green: jsdom hands the
+ * input a fresh list on reset, so a handler that captures `input.files` and
+ * *then* sets `input.value = ""` still sees a populated list under test and an
+ * empty one in Chrome, Edge and Safari. Modelled rather than trusted.
+ */
+function blinkFileList(...files: File[]): FileList {
+  const list = {
+    length: files.length,
+    item: (index: number): File | null => files[index] ?? null,
+    clear(): void {
+      this.length = 0;
+    },
+    *[Symbol.iterator](): Generator<File> {
+      for (let index = 0; index < this.length; index++) yield files[index]!;
+    },
+  };
+  files.forEach((file, index) => Object.defineProperty(list, index, { value: file }));
+  // A test double for a host object with no constructor reachable from script.
+  return list as unknown as FileList;
+}
+
+/** Wire `input.value = ""` to clear `input.files` in place, the way a browser does. */
+function pick(input: HTMLInputElement, ...files: File[]): void {
+  const list = blinkFileList(...files);
+  Object.defineProperty(input, "files", { configurable: true, get: () => list });
+  Object.defineProperty(input, "value", {
+    configurable: true,
+    get: () => "",
+    set: () => (list as unknown as { clear: () => void }).clear(),
+  });
+  fireEvent.change(input);
+}
+
+describe("ChatInput attachments", () => {
+  it("uploads a file picked through the paperclip, having copied it before resetting the input", async () => {
+    // The picker was dead on every real browser: the handler kept the input's
+    // own live `FileList`, reset the input - which empties that same object -
+    // and only then read it, so `Array.from` saw nothing and the upload
+    // returned at its empty guard. No card, no toast, no request, nothing in
+    // either service's logs. Drag-and-drop and paste were unaffected, because
+    // neither goes through the input.
+    state.upload.mockResolvedValue(uploaded({ filename: "notes.txt", size: 2 }));
+    const { container } = render(<ChatInput onSend={vi.fn()} />);
+
+    pick(
+      container.querySelector<HTMLInputElement>('input[type="file"]')!,
+      new File(["hi"], "notes.txt", { type: "text/plain" }),
+    );
+
+    await waitFor(() => expect(state.upload).toHaveBeenCalledOnce());
+    expect(state.upload.mock.calls[0]![0].name).toBe("notes.txt");
+    expect(await screen.findByText("notes.txt")).toBeVisible();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("shows a card per queued file while it uploads, not one box beside the finished ones", async () => {
+    let answer: (file: FileUploadResponse) => void = () => {};
+    state.upload.mockImplementation(
+      () => new Promise<FileUploadResponse>((resolve) => (answer = resolve)),
+    );
+    const { container } = render(<ChatInput onSend={vi.fn()} />);
+
+    await userEvent.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]')!,
+      new File(["column,value"], "data.csv", { type: "text/csv" }),
+    );
+
+    expect(await screen.findByText("data.csv")).toBeVisible();
+    expect(screen.getByText("Uploading · 12 B")).toBeVisible();
+
+    answer(uploaded({ filename: "data.csv", size: 12, preview: "column,value" }));
+
+    expect(await screen.findByText("CSV · 12 B")).toBeVisible();
+    expect(screen.queryByText(/Uploading/)).toBeNull();
+  });
+
+  it("keeps twenty attachments on one scrolling row", async () => {
+    // #927. They were a wrapping grid of 224px tiles: six files were two rows and
+    // twenty were seven, about 850px of composer, with the message box below the
+    // fold. This assertion fails if somebody restores the wrap.
+    const { container } = render(<ChatInput onSend={vi.fn()} />);
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+
+    for (let n = 0; n < 20; n++) {
+      state.upload.mockResolvedValueOnce(uploaded({ filename: `report-${n}.csv`, size: 12 }));
+    }
+    await userEvent.upload(
+      input,
+      Array.from(
+        { length: 20 },
+        (_, n) => new File(["a,b"], `report-${n}.csv`, { type: "text/csv" }),
+      ),
+    );
+
+    expect(await screen.findByText("report-19.csv")).toBeVisible();
+    expect(screen.getByText("20 files")).toBeVisible();
+
+    const row = screen.getByText("report-19.csv").closest(".overflow-x-auto");
+
+    expect(row).not.toBeNull();
+    expect(row!.className).not.toMatch(/flex-wrap/);
+  });
+
+  it("removes an attachment without needing a hover first", async () => {
+    const onSend = vi.fn();
+    render(<ChatInput onSend={onSend} />);
+
+    await userEvent.click(screen.getByRole("textbox"));
+    await userEvent.paste(LONG);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Remove pasted-2026-08-08.txt" }),
+    );
+
+    expect(screen.queryByText("pasted-2026-08-08.txt")).toBeNull();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  });
+  it("refuses a file over the chat ceiling without uploading it", async () => {
+    // #498. The composer checked against a default of 50MB while the server
+    // refused at 10, so a 20MB file passed here, was read, was sent in full and
+    // came back refused by a number no configuration held. The client's ceiling
+    // is the chat surface's own now, not the knowledge base's.
+    const { container } = render(<ChatInput onSend={vi.fn()} />);
+
+    await userEvent.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]')!,
+      new File([new Uint8Array(CHAT_MAX_UPLOAD_SIZE_MB * 1024 * 1024 + 1)], "export.csv", {
+        type: "text/csv",
+      }),
+    );
+
+    expect(toast.error).toHaveBeenCalledWith(
+      `export.csv: File too large. Maximum ${CHAT_MAX_UPLOAD_SIZE_MB}MB.`,
+    );
+    expect(state.upload).not.toHaveBeenCalled();
+    expect(screen.queryByText("export.csv")).toBeNull();
+  });
+
+  it("accepts a file at the ceiling, so the boundary is not off by one", async () => {
+    const atLimit = CHAT_MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+    state.upload.mockResolvedValue(uploaded({ filename: "atlimit.csv", size: atLimit }));
+    const { container } = render(<ChatInput onSend={vi.fn()} />);
+
+    await userEvent.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]')!,
+      new File([new Uint8Array(atLimit)], "atlimit.csv", { type: "text/csv" }),
+    );
+
+    expect(await screen.findByText("atlimit.csv")).toBeVisible();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("takes the ceiling from the deployment, not from the build (#1544)", async () => {
+    // One published image serves every deployment, so the number the composer
+    // refuses at is the running server's `CHAT_MAX_UPLOAD_SIZE_MB`, handed down
+    // through the public-config context rather than inlined at build time.
+    const { container } = render(
+      <PublicConfigProvider config={{ ...DEFAULT_PUBLIC_CONFIG, chatMaxUploadSizeMb: 1 }}>
+        <ChatInput onSend={vi.fn()} />
+      </PublicConfigProvider>,
+    );
+
+    await userEvent.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]')!,
+      new File([new Uint8Array(1024 * 1024 + 1)], "export.csv", { type: "text/csv" }),
+    );
+
+    expect(toast.error).toHaveBeenCalledWith("export.csv: File too large. Maximum 1MB.");
+    expect(state.upload).not.toHaveBeenCalled();
+  });
+});
