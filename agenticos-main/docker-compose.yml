@@ -8,7 +8,6 @@
 # beside this file when there is something to change - `AGENTICOS_VERSION` to
 # pin a release, `PUBLIC_*` when the browser reaches the host by a name other
 # than `localhost`, a provider key. `docs/install.md` has the list.
-#
 # In a clone, Compose merges `docker-compose.override.yml` over this file on its
 # own, and that override is what turns it into the local development stack:
 # source built into the image, bind-mounted and reloading, the database and
@@ -124,6 +123,19 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    restart: unless-stopped
+
+  # Optional local model server. Keep it behind a profile so the default stack
+  # does not pull the large image or reserve memory for inference.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: [ollama]
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - backend
     restart: unless-stopped
 
   db:
@@ -454,5 +466,6 @@ networks:
 volumes:
   media_data:
   minio_data:
+  ollama_data:
   postgres_data:
   prefect_data:

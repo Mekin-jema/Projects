@@ -1,5 +1,5 @@
 ---
-source_sha: "0b5ae075ae8b"
+source_sha: "13d01d45bcaf"
 ---
 
 # Modelle und Provider { #models-and-providers }
@@ -167,6 +167,24 @@ Zugangsdaten ein Provider verlangt.**
 |---|---|---|---|
 | Ollama | `ollama` | keine | ✓ |
 | LiteLLM proxy | `litellm` | keine | ✓ (`api_base`) |
+
+### Ollama in diesem Compose-Stack ausführen { #run-ollama-in-this-compose-stack }
+
+Die `docker-compose.yml` im Repository-Stamm enthält Ollama im Profil `ollama`.
+Der Standard-Stack lädt daher nicht das Image herunter und startet den Model
+Server nicht. Starten Sie ihn im Repository-Stamm und laden Sie ein Modell:
+
+```sh
+docker compose --profile ollama up -d ollama
+docker compose exec ollama ollama pull qwen2.5:7b
+```
+
+Ollama speichert heruntergeladene Modelle im Volume `ollama_data`. Der Port wird
+nur an die Loopback-Adresse des Hosts gebunden. AgenticOS erreicht Ollama über das
+Compose-Netzwerk. Erstellen Sie daher unter **Agents → add a model** ein
+Modellprofil mit Provider `Ollama`, Modell-ID `qwen2.5:7b` (oder der genau
+heruntergeladenen ID), ohne Key und mit dem Endpunkt `http://ollama:11434/v1`.
+Wählen Sie dieses Profil für einen Agenten aus und veröffentlichen Sie ihn.
 
 Diese beiden sind der Grund, warum "keine Zugangsdaten" eine gespeicherte **Art**
 ist und keine leere Zeichenkette. Ein Model Server im eigenen Netz hat meist

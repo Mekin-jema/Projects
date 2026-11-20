@@ -1,0 +1,214 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { useSharing } from "./use-sharing";
+import { apiClient } from "@/lib/api-client";
+import type { ResourceSharing } from "@/types/sharing";
+
+vi.mock("@/lib/api-client", () => ({
+  apiClient: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+}));
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+
+function wrapper({ children }: { children: ReactNode }) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+}
+
+const SHARING: ResourceSharing = {
+  resource_type: "agent",
+  resource_id: "a1",
+  owner_user_id: "u-owner",
+  visibility: "private",
+  grants: [
+    {
+      id: "g1",
+      subject_user_id: "u-sam",
+      subject_email: "sam@example.com",
+      subject_group_id: null,
+      subject_group_name: null,
+      resource_type: "agent",
+      resource_id: "a1",
+      level: "read",
+    },
+  ],
+};
+
+describe("useSharing", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(apiClient.get).mockResolvedValue(SHARING);
+  });
+
+  it("reads who reaches the resource", async () => {
+    const { result } = renderHook(() => useSharing("agent", "a1"), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(apiClient.get).toHaveBeenCalledWith("/agents/a1/sharing");
+    expect(result.current.sharing?.grants[0]?.subject_email).toBe("sam@example.com");
+  });
+
+  it("addresses each resource type at its own endpoints", async () => {
+    // The same four routes exist per type. A panel hardcoded to agents is how
+    // sharing a skill silently edits an agent with a colliding id.
+    const { result } = renderHook(() => useSharing("skill", "s1"), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(apiClient.get).toHaveBeenCalledWith("/skills/s1/sharing");
+
+    vi.mocked(apiClient.put).mockResolvedValue({});
+    await result.current.share.mutateAsync({ subject_user_id: "u-sam", level: "use" });
+    expect(apiClient.put).toHaveBeenCalledWith("/skills/s1/sharing/grants", {
+      subject_user_id: "u-sam",
+      level: "use",
+    });
+  });
+
+  it("does not fetch until a resource is selected", () => {
+    renderHook(() => useSharing("agent", null), { wrapper });
+    expect(apiClient.get).not.toHaveBeenCalled();
+  });
+
+  it("sends the whole grant when sharing, so a level change is the same call", async () => {
+    vi.mocked(apiClient.put).mockResolvedValue({});
+    const { result } = renderHook(() => useSharing("agent", "a1"), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await result.current.share.mutateAsync({ subject_user_id: "u-sam", level: "edit" });
+
+    expect(apiClient.put).toHaveBeenCalledWith("/agents/a1/sharing/grants", {
+      subject_user_id: "u-sam",
+      level: "edit",
+    });
+  });
+
+  it("revokes by subject, then re-reads rather than trusting its own guess", async () => {
+    vi.mocked(apiClient.delete).mockResolvedValue(undefined);
+    const { result } = renderHook(() => useSharing("agent", "a1"), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await result.current.revoke.mutateAsync({ kind: "user", id: "u-sam" });
+
+    expect(apiClient.delete).toHaveBeenCalledWith("/agents/a1/sharing/grants/u-sam");
+    // Visibility and the grant list move together on the server; refetching is
+    // what keeps the panel from showing a share that no longer exists.
+    await waitFor(() => expect(apiClient.get).toHaveBeenCalledTimes(2));
+  });
+
+  it("shares with a group by its own key, and revokes it at the group endpoint", async () => {
+    // A user id and a group id are both bare UUIDs, so the kind is in the key and
+    // the path - never guessed from the id.
+    vi.mocked(apiClient.put).mockResolvedValue({});
+    vi.mocked(apiClient.delete).mockResolvedValue(undefined);
+    const { result } = renderHook(() => useSharing("agent", "a1"), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await result.current.share.mutateAsync({ subject_group_id: "g-fin", level: "use" });
+    await result.current.revoke.mutateAsync({ kind: "group", id: "g-fin" });
+
+    expect(apiClient.put).toHaveBeenCalledWith("/agents/a1/sharing/grants", {
+      subject_group_id: "g-fin",
+      level: "use",
+    });
+    expect(apiClient.delete).toHaveBeenCalledWith("/agents/a1/sharing/group-grants/g-fin");
+  });
+
+  it("changes visibility and re-reads the sharing state it affects", async () => {
+    vi.mocked(apiClient.patch).mockResolvedValue({ ...SHARING, visibility: "org" });
+    const { result } = renderHook(() => useSharing("agent", "a1"), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await result.current.setVisibility.mutateAsync("org");
+
+    expect(apiClient.patch).toHaveBeenCalledWith("/agents/a1/sharing/visibility", {
+      visibility: "org",
+    });
+    await waitFor(() => expect(apiClient.get).toHaveBeenCalledTimes(2));
+  });
+
+  it("marks the resource's own queries stale, since they carry the visibility too", async () => {
+    // An artifact's page reads its reach from the artifact, not from the panel:
+    // re-reading only the sharing state left it naming the old one.
+    vi.mocked(apiClient.patch).mockResolvedValue({ ...SHARING, visibility: "org" });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["artifacts", "r1"], { id: "r1", visibility: "private" });
+    client.setQueryData(["agents", "a1"], { id: "a1" });
+    const own = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useSharing("artifact", "r1"), { wrapper: own });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await result.current.setVisibility.mutateAsync("org");
+
+    expect(client.getQueryState(["artifacts", "r1"])?.isInvalidated).toBe(true);
+    expect(client.getQueryState(["agents", "a1"])?.isInvalidated).toBe(false);
+  });
+
+  it("surfaces the server's refusal instead of leaving the panel silent", async () => {
+    const { toast } = await import("sonner");
+    vi.mocked(apiClient.put).mockRejectedValue(new Error("You cannot change sharing"));
+    const { result } = renderHook(() => useSharing("agent", "a1"), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await expect(
+      result.current.share.mutateAsync({ subject_user_id: "u-sam", level: "read" }),
+    ).rejects.toThrow("You cannot change sharing");
+    expect(toast.error).toHaveBeenCalledWith("You cannot change sharing");
+  });
+
+  it("surfaces a refused revoke and a refused visibility change too", async () => {
+    // All three mutations are the same permission on the server, and a panel that
+    // silently did nothing would read as a share that worked.
+    const { toast } = await import("sonner");
+    const refused = new Error("You cannot change sharing");
+    vi.mocked(apiClient.delete).mockRejectedValue(refused);
+    vi.mocked(apiClient.patch).mockRejectedValue(refused);
+    const { result } = renderHook(() => useSharing("agent", "a1"), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await expect(result.current.revoke.mutateAsync({ kind: "user", id: "u-sam" })).rejects.toThrow(
+      refused,
+    );
+    await expect(result.current.setVisibility.mutateAsync("org")).rejects.toThrow(refused);
+
+    expect(toast.error).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels the in-flight read before invalidating, so a stale refetch cannot win (#154)", async () => {
+    // invalidateQueries dedupes its refetch onto a fetch already running; a read
+    // that began before the mutation committed would otherwise resolve with the
+    // pre-write body and leave the panel stale. Cancelling first forces a new
+    // post-commit fetch.
+    vi.mocked(apiClient.put).mockResolvedValue({});
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const cancelSpy = vi.spyOn(client, "cancelQueries");
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    const scoped = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+
+    const { result } = renderHook(() => useSharing("agent", "a1"), { wrapper: scoped });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await result.current.share.mutateAsync({ subject_user_id: "u-sam", level: "read" });
+
+    const key = ["sharing", "agent", "a1"];
+    expect(cancelSpy).toHaveBeenCalledWith({ queryKey: key });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: key });
+    const cancelOrder = cancelSpy.mock.invocationCallOrder[0] ?? 0;
+    const invalidateOrder = invalidateSpy.mock.invocationCallOrder[0] ?? 0;
+    expect(cancelOrder).toBeGreaterThan(0);
+    expect(cancelOrder).toBeLessThan(invalidateOrder);
+  });
+
+  it("addresses a collection at the plural of its own noun", async () => {
+    // Four routes exist per type and the paths are not derivable from the type
+    // name; a wrong stem shares a resource that does not exist.
+    const { result } = renderHook(() => useSharing("collection", "c1"), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(apiClient.get).toHaveBeenCalledWith("/kb/c1/sharing");
+  });
+});

@@ -156,6 +156,23 @@ inference cannot: **which credential shape a provider wants.**
 | Ollama | `ollama` | none | ✓ |
 | LiteLLM proxy | `litellm` | none | ✓ (`api_base`) |
 
+### Run Ollama in this Compose stack { #run-ollama-in-this-compose-stack }
+
+The root `docker-compose.yml` includes Ollama behind the `ollama` profile, so the
+default stack does not download its image or start the model server. From the
+repository root, start it and download a model:
+
+```sh
+docker compose --profile ollama up -d ollama
+docker compose exec ollama ollama pull qwen2.5:7b
+```
+
+Ollama keeps downloaded models in the `ollama_data` volume. Its port is published
+only on the host's loopback address. AgenticOS reaches Ollama over the Compose
+network, so add a model profile under **Agents → add a model** with provider
+`Ollama`, model id `qwen2.5:7b` (or the exact id you pulled), no key, and endpoint
+`http://ollama:11434/v1`. Select that profile for an agent, then publish the agent.
+
 These two are why "no credential" is a stored **kind** rather than an empty string.
 A model server on your own network usually has nothing to authenticate against, and
 the vault refuses an empty secret — so the resolver switches on a total set instead

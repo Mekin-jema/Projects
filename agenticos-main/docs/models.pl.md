@@ -1,5 +1,5 @@
 ---
-source_sha: "0b5ae075ae8b"
+source_sha: "13d01d45bcaf"
 ---
 
 # Modele i providery { #models-and-providers }
@@ -162,6 +162,24 @@ provider.**
 |---|---|---|---|
 | Ollama | `ollama` | brak | ✓ |
 | proxy LiteLLM | `litellm` | brak | ✓ (`api_base`) |
+
+### Uruchom Ollama w tym stosie Compose { #run-ollama-in-this-compose-stack }
+
+Główny plik `docker-compose.yml` zawiera Ollama w profilu `ollama`, więc domyślny
+stos nie pobiera obrazu ani nie uruchamia serwera modeli. W katalogu głównym
+repozytorium uruchom usługę i pobierz model:
+
+```sh
+docker compose --profile ollama up -d ollama
+docker compose exec ollama ollama pull qwen2.5:7b
+```
+
+Ollama przechowuje pobrane modele w wolumenie `ollama_data`. Port jest
+udostępniony tylko pod adresem loopback hosta. AgenticOS łączy się z Ollama przez
+sieć Compose. W **Agents → add a model** utwórz profil modelu z providerem
+`Ollama`, identyfikatorem modelu `qwen2.5:7b` (lub dokładnym pobranym
+identyfikatorem), bez klucza i z endpointem `http://ollama:11434/v1`. Wybierz
+ten profil dla agenta i opublikuj agenta.
 
 Te dwa są powodem, dla którego „brak poświadczenia” jest zapisanym **rodzajem**, a
 nie pustym stringiem. Serwer modelowy we własnej sieci zwykle nie ma się wobec

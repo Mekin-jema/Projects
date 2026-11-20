@@ -1,5 +1,5 @@
 ---
-source_sha: "0b5ae075ae8b"
+source_sha: "13d01d45bcaf"
 ---
 
 # Modelos y providers { #models-and-providers }
@@ -163,6 +163,24 @@ credencial quiere un provider.**
 |---|---|---|---|
 | Ollama | `ollama` | ninguna | ✓ |
 | LiteLLM proxy | `litellm` | ninguna | ✓ (`api_base`) |
+
+### Ejecutar Ollama en esta pila de Compose { #run-ollama-in-this-compose-stack }
+
+El `docker-compose.yml` de la raíz incluye Ollama tras el perfil `ollama`, por lo
+que la pila predeterminada no descarga su imagen ni inicia el servidor de modelos.
+Desde la raíz del repositorio, inicia el servicio y descarga un modelo:
+
+```sh
+docker compose --profile ollama up -d ollama
+docker compose exec ollama ollama pull qwen2.5:7b
+```
+
+Ollama guarda los modelos descargados en el volumen `ollama_data`. El puerto solo
+se publica en la dirección loopback del host. AgenticOS se conecta a Ollama a
+través de la red de Compose. En **Agents → add a model**, crea un perfil con el
+provider `Ollama`, el id de modelo `qwen2.5:7b` (o el id exacto que descargaste),
+sin clave y con el endpoint `http://ollama:11434/v1`. Selecciona ese perfil para
+un agent y publícalo.
 
 Estos dos son la razón de que «sin credencial» sea un **kind** almacenado y no
 una cadena vacía. Un servidor de modelos en tu propia red no suele tener nada
