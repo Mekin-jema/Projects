@@ -118,7 +118,13 @@ services:
     # shorter than this application takes to import on any machine measured, so
     # every start went through a spell of `unhealthy` before settling.
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/api/v1/health').raise_for_status()"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import httpx; httpx.get('http://localhost:8000/api/v1/health').raise_for_status()",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -211,7 +217,13 @@ services:
     networks:
       - backend
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')",
+        ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -257,7 +269,13 @@ services:
     # and registering the deployments: until the first poll `/health` has no
     # `last_polled` to compare against and errors.
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://127.0.0.1:8080/health').raise_for_status()"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import httpx; httpx.get('http://127.0.0.1:8080/health').raise_for_status()",
+        ]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -307,7 +325,13 @@ services:
         condition: service_healthy
     healthcheck:
       # The oven/bun image has no curl/wget, so probe with bun's built-in fetch.
-      test: ["CMD", "bun", "-e", "fetch('http://localhost:3000/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "fetch('http://localhost:3000/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
       interval: 30s
       timeout: 10s
       start_period: 40s
