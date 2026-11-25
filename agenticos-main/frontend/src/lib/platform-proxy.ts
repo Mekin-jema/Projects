@@ -34,9 +34,45 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
+// NextRequest
+// NextRequest is a Next.js class representing an incoming HTTP request.
+
+// It gives you access to:
+// request.method
+// request.url
+// request.nextUrl
+// request.headers
+// request.cookies
+// request.body
+
 import { bffRefusal } from "@/lib/server-api";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
+
+// This defines a custom HTTP header.
+
+// HTTP headers carry additional information about a request.
+
+// For example:
+// GET /api/v1/agents HTTP/1.1
+// Authorization: Bearer abc123
+// X-Organization-Id: org-456
+// The backend can interpret this as:
+// - The user is authenticated using token abc123.
+// - The request is intended for organization org-456.
+// The organization header is particularly important in multi-tenant applications.
+
+// A multi-tenant platform serves multiple organizations using the same application and backend infrastructure.
+
+// Example:
+// Alice belongs to org-123
+// Bob belongs to org-456
+// Both Alice and Bob use the same backend
+// When Alice requests /api/agents, the backend must return agents belonging to org-123
+// When Bob requests /api/agents, the backend must return agents belonging to org-456
+// The backend uses the organization header to determine which organization's data to return
+// Without the organization header, the backend would not know which organization's data to return
+
 
 const ORG_HEADER = "X-Organization-Id";
 
@@ -103,7 +139,30 @@ function describingHeaders(source: Headers): Headers {
 }
 
 /** Whether `Accept-Encoding` lists gzip with a quality above zero. */
+// The whole function in simple English
+// The function does this:
+// 1. If the header is null, replace it with an empty string.
+// 2. Split the header into individual encoding entries using commas.
+// 3. Check each entry.
+// 4. Split each entry into the encoding name and its parameters.
+// 5. Clean up spaces and convert everything to lowercase.
+// 6. Find the q quality parameter, if one exists.
+// 7. Return true if the entry is gzip and its quality is greater than zero, or if no quality parameter exists.
+// 8. If no matching entry is found, return false.
 function acceptsGzip(header: string | null): boolean {
+  // The ?? operator is called the nullish coalescing operator.
+  // Accept-Encoding: gzip;q=1.0, br;q=0.8  -- this sample accept encoding 
+  //   What is q in HTTP?
+  // The q parameter is called a quality value.
+
+  // It indicates how acceptable or preferred a particular encoding is.
+
+  // The value normally ranges from 0 to 1.
+  // Quality	Meaning
+  // q=1	Fully acceptable
+  // q=0.8	Acceptable, with a lower preference
+  // q=0.5	Acceptable
+  // q=0	Not acceptable
   return (header ?? "").split(",").some((entry) => {
     const [coding, ...params] = entry.split(";").map((part) => part.trim().toLowerCase());
     const quality = params.find((param) => param.startsWith("q="));
@@ -125,6 +184,47 @@ export function platformProxy(): ProxyHandlers {
       return bffRefusal("NOT_AUTHENTICATED", 401);
     }
 
+    // The request.nextUrl object provides information about the URL
+    // of the incoming request.
+    //
+    // Example URL:
+    // https://example.com:8080/api/v1/agents?param1=value1&param2=value2#section1
+    //
+    // nextUrl.pathname
+    //   The path of the URL.
+    //   Example: /api/v1/agents
+    //
+    // nextUrl.search
+    //   The query string, including the question mark.
+    //   Example: ?param1=value1&param2=value2
+    //
+    // nextUrl.searchParams
+    //   Provides access to individual query parameters.
+    //   Example: URLSearchParams
+    //   Usage: nextUrl.searchParams.get("param1") // "value1"
+    //
+    // nextUrl.hash
+    //   The fragment identifier, including the # symbol.
+    //   Example: #section1
+    //
+    // nextUrl.origin
+    //   The URL's scheme, hostname, and port.
+    //   Example: https://example.com:8080
+    //
+    // nextUrl.href
+    //   The complete URL as a string.
+    //   Example: https://example.com:8080/api/v1/agents?param1=value1&param2=value2#section1
+    //
+    // nextUrl.toString()
+    //   Returns the complete URL as a string.
+    //
+    // nextUrl.toJSON()
+    //   Returns the URL as a string when serialized to JSON.
+    //
+    // nextUrl.toLocaleString()
+    //   Returns the URL as a string using its locale-aware
+    //   string conversion.
+
     const path = request.nextUrl.pathname.replace(/^\/api/, "");
     const url = `${BACKEND_URL}/api/v1${path}${request.nextUrl.search}`;
 
@@ -139,6 +239,19 @@ export function platformProxy(): ProxyHandlers {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         ...(contentType ? { "Content-Type": contentType } : {}),
+        //         Why use [ORG_HEADER]?
+        // { [ORG_HEADER]: organizationId }
+        // This is called a computed property name.
+        // Because:
+        // ORG_HEADER = "X-Organization-Id"
+        // the object becomes:
+        // {
+        //   "X-Organization-Id": "org-123"
+        // }
+        // The square brackets tell JavaScript to use the value of the variable as the property name.
+        // Without the square brackets:
+        // { ORG_HEADER: organizationId }
+
         ...(organizationId ? { [ORG_HEADER]: organizationId } : {}),
       },
       // Bytes, not text, and buffered rather than streamed. Reading the body as

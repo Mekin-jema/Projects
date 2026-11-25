@@ -39,6 +39,72 @@ route file per endpoint repeating the same twelve lines.
     A hand-rolled route file owes the same header — the proxy is the only place
     that applies it for you.
 
+## How an API route reaches FastAPI
+
+A route handler in `src/app/api/**/route.ts` is a small server-side adapter.
+For example:
+
+```ts
+import { platformProxy } from "@/lib/platform-proxy";
+
+export const { GET, POST, PUT, PATCH, DELETE } = platformProxy();
+```
+
+This is shorthand for exporting one Next.js route handler for each HTTP method:
+
+```ts
+const handlers = platformProxy();
+
+export const GET = handlers.GET;
+export const POST = handlers.POST;
+export const PUT = handlers.PUT;
+export const PATCH = handlers.PATCH;
+export const DELETE = handlers.DELETE;
+```
+
+Next.js calls the exported function that matches the browser's method. The
+destructuring syntax in the short form unpacks the five properties returned by
+`platformProxy()` and gives each property the same name when it creates the
+module export.
+
+The route file does not choose or repeat a backend endpoint. `platformProxy()`
+reads `request.nextUrl.pathname` and sends it after the FastAPI prefix
+`/api/v1`. For example:
+
+| Browser request | Backend request |
+|---|---|
+| `GET /api/agents/a1/versions?limit=5` | `GET http://localhost:8000/api/v1/agents/a1/versions?limit=5` |
+| `POST /api/agents` | `POST http://localhost:8000/api/v1/agents` |
+
+The catch-all directory `[...path]` or `[[...path]]` decides how much of the
+browser URL a route file owns. A segment in brackets is a dynamic segment:
+`[id]` receives one segment and `[[...path]]` can receive any remaining
+segments, including none. It does not change the proxy: both route forms pass
+the complete pathname in `request.nextUrl.pathname`.
+
+During forwarding, the proxy:
+
+1. returns `401 NOT_AUTHENTICATED` if the HttpOnly `access_token` cookie is missing;
+2. builds the FastAPI URL from the pathname and query string;
+3. sends the access token as `Authorization: Bearer <token>`;
+4. forwards `X-Organization-Id` when the browser selected an organization;
+5. forwards `POST`, `PUT`, and `PATCH` bodies as bytes and preserves their content type;
+6. streams the backend response back with its status, body, and response headers;
+7. adds `Cache-Control: no-store` when FastAPI gave no cache policy.
+
+The browser can therefore call `/api/agents` instead of knowing about
+`BACKEND_URL`. The access token stays in an HttpOnly cookie, so client JavaScript
+cannot read it, and the response keeps FastAPI's status and error detail instead
+of being replaced by a generic Next.js error.
+
+!!! tip "When to add a route file"
+
+    Use `platformProxy()` when the Next.js route only forwards to the same path
+    on FastAPI. Add a custom route handler when Next.js must perform an
+    application-specific step, such as accepting a login, setting or clearing
+    cookies, constructing a signed public URL, or handling a binary response
+    differently.
+
 ## Data, and where state lives
 
 **All API access goes through a client in `src/lib/`, consumed via a hook.** No

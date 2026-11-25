@@ -1,0 +1,849 @@
+[project]
+name = "agenticos"
+version = "0.0.535"
+description = "OS for your agents."
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "DEENUU1", email = "kacper.wlodarczyk@vstorm.co" },
+]
+
+dependencies = [
+
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.54.0",
+    "pydantic[email]>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "python-multipart>=0.0.20",
+    "logfire[fastapi,asyncpg,redis,httpx]>=5.1.0",
+    "sqlalchemy[asyncio]>=2.1.3",
+    "asyncpg>=0.31.0",
+
+    "psycopg2-binary>=2.9.13",
+    "alembic>=1.19.2",
+    "greenlet>=3.5.5",
+    "pyjwt>=2.15.1",
+    "bcrypt>=4.0.0",
+    "authlib>=1.8.0",
+
+    "anyio>=4.15.1",
+    "redis>=8.1.0",
+    "aiosmtplib>=5.1.3",
+
+    "itsdangerous>=2.2.0",
+    "prefect>=3.8.7",
+
+    "pydantic-ai-slim[openrouter,anthropic,google,duckduckgo,web-fetch,groq,mistral,cohere,huggingface,xai]>=2.52.0",
+    "genai-prices>=0.1.4",
+    "pydantic-ai-slim[mcp]>=2.52.0",
+
+    "mcp>=2.3.0",
+
+    "pydantic-ai-harness>=0.52.0",
+    "websockets>=15.0",
+
+    "rank-bm25>=0.2.2",
+    "pymupdf>=1.28.2",
+
+    "pillow>=10.0.0",
+    "python-docx>=1.1.0",
+    "openpyxl>=3.1.0",
+    "llama-cloud>=2.16.0",
+    "liteparse>=2.15.1",
+    "google-api-python-client>=2.201.0",
+    "google-auth>=2.59.1",
+    "boto3>=1.43.108",
+
+    "httpx>=0.28.0",
+    "httpx2>=2.13.1",
+    "click>=8.5.0",
+
+    "tabulate>=0.9.0",
+
+    "markdown-it-py>=4.0.0",
+    "tqdm>=4.70.1",
+    "tavily-python>=0.8.4",
+    "pydantic-monty>=1.1.0",
+
+    "pydantic-ai-skills>=2.0.0",
+
+    "pydantic-ai-backend[console,remote,workspaces,daytona]>=0.2.32",
+
+    "subagents-pydantic-ai>=0.2.25",
+    "cryptography>=50.0.2",
+    "aiogram>=3.31.0,<4.0",
+    "slack-sdk>=3.45.0",
+
+    "aiohttp>=3.14.4",
+
+    "croniter>=3.0.0",
+    "mem0ai>=2.2.1",
+    "requests>=2.34.2",
+    "xlrd>=2.0.2",
+    "odfpy>=1.4.1",
+    "python-pptx>=1.0.2",
+    "olefile>=0.47",
+
+    "ldap3>=2.9.1",
+
+    "phonenumberslite>=9.0.40",
+]
+
+[project.optional-dependencies]
+
+browser = [
+    "cdp-use==1.4.5",
+    "pydantic-ai-slim[typesafe]>=2.52.0",
+]
+
+kerberos = [
+    "gssapi>=1.9.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.0",
+    "anyio[trio]>=4.15.1",
+    "pytest-cov>=6.1.0",
+    "httpx>=0.28.0",
+    "ruff>=0.16.10",
+    "ty>=0.0.84",
+    "pre-commit>=4.6.2",
+    "pytest-xdist>=3.8.0",
+
+    "pytest-randomly>=5.0.0",
+    "vulture>=2.14",
+
+    "deptry>=0.23.0",
+
+    "types-ldap3>=2.9.13",
+]
+
+docs = [
+    "mkdocs>=1.6.0",
+    "mkdocs-glightbox>=0.5.2",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=1.0.6",
+
+    "mkdocs-static-i18n>=1.2.3",
+]
+
+[project.scripts]
+agenticos = "cli.commands:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app", "cli"]
+
+[tool.vulture]
+paths = ["app"]
+min_confidence = 80
+ignore_decorators = [
+    "@field_validator",
+    "@model_validator",
+    "@field_serializer",
+    "@model_serializer",
+    "@computed_field",
+    "@router.*",
+    "@*.get",
+    "@*.post",
+    "@*.put",
+    "@*.patch",
+    "@*.delete",
+    "@*.websocket",
+]
+ignore_names = []
+
+[tool.deptry]
+known_first_party = ["app", "cli"]
+ignore = ["DEP001", "DEP003"]
+
+[tool.deptry.per_rule_ignores]
+
+DEP002 = [
+    "python-multipart",
+    "asyncpg",
+    "psycopg2-binary",
+    "greenlet",
+    "itsdangerous",
+    "aiohttp",
+
+    "requests",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "SIM",
+    "RUF",
+    "ASYNC",
+    "S",
+    "A",
+    "DTZ",
+    "T20",
+    "LOG",
+    "G",
+    "PIE",
+    "RET",
+    "TID",
+    "PTH",
+    "ERA",
+    "TRY",
+]
+ignore = [
+    "E501",
+    "E402",
+    "B008",
+    "B905",
+    "RUF012",
+    "RUF059",
+    "TRY003",
+    "TRY400",
+    "S101",
+
+    "S105",
+    "S106",
+
+    "ASYNC109",
+    "ASYNC240",
+]
+
+[tool.ruff.lint.per-file-ignores]
+
+"alembic/**" = ["ERA001", "S608"]
+
+"../scripts/**" = ["T201", "S603", "S607"]
+
+"../loadtest/**" = ["T201"]
+
+"app/services/rag/vectorstore.py" = ["S608"]
+
+"app/repositories/memory.py" = ["S608"]
+
+"app/api/exception_handlers.py" = ["LOG004"]
+
+"app/agents/capabilities/_registry.py" = ["A002"]
+
+"tests/**" = [
+    "S105",
+    "S106",
+
+    "S107",
+    "S311",
+
+    "S603",
+
+    "S104",
+    "A002",
+    "TRY300",
+    "RET504",
+    "PLR2004",
+    "SLF001",
+]
+
+"app/services/rag/retrieval.py" = ["S324"]
+"app/services/file_upload.py" = ["TRY300", "PTH123", "PTH108"]
+
+"app/core/sanitize.py" = ["PTH119", "S107"]
+"app/services/agent.py" = ["TRY300", "TRY301"]
+"app/services/channels/telegram.py" = ["TRY300", "S107"]
+"app/services/rag/ingestion.py" = ["TRY300", "PTH123"]
+"app/services/rag/documents.py" = ["PTH123"]
+"app/services/rag/sources/google_drive.py" = ["ASYNC230", "PTH123"]
+"app/worker/tasks/rag_tasks.py" = ["TRY300"]
+"app/clients/redis.py" = ["TRY300"]
+"app/core/security.py" = ["TRY300"]
+"app/commands/seed.py" = ["S311"]
+
+"app/services/channels/slack.py" = ["ASYNC110"]
+"app/services/rag/connectors/google_drive.py" = ["PTH123"]
+
+"cli/**" = ["S104", "TRY300"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "cli"]
+
+[tool.ty.terminal]
+
+error-on-warning = true
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+
+exclude = [
+    "alembic/",
+    "tests/",
+    "cli/",
+]
+
+[tool.ty.rules]
+
+invalid-parameter-default = "warn"
+
+invalid-argument-type = "warn"
+
+invalid-assignment = "warn"
+
+unresolved-attribute = "warn"
+
+deprecated = "warn"
+
+unresolved-import = "ignore"
+
+no-matching-overload = "warn"
+
+unused-type-ignore-comment = "warn"
+
+unused-ignore-comment = "ignore"
+
+unsupported-operator = "warn"
+
+invalid-await = "warn"
+
+invalid-context-manager = "warn"
+
+missing-argument = "warn"
+
+[[tool.ty.overrides]]
+include = [
+    "app/agents/**",
+    "app/commands/bootstrap.py",
+    "app/commands/audit_skill_bindings.py",
+    "app/commands/audit_verify.py",
+    "app/commands/vault_rotate.py",
+    "app/commands/sandbox_runtimes.py",
+    "app/commands/invite_members.py",
+    "app/commands/data_protection.py",
+    "app/core/permissions.py",
+    "app/core/catalog/**",
+    "app/core/secret_kinds.py",
+    "app/core/vault.py",
+
+    "app/core/audit.py",
+    "app/core/background.py",
+
+    "app/core/blocking.py",
+
+    "app/core/office_convert.py",
+
+    "app/core/sanitize.py",
+
+    "app/core/excerpt.py",
+
+    "app/core/pinned_http.py",
+
+    "app/services/rag/connectors/web.py",
+    "app/services/rag/connectors/web_page.py",
+
+    "app/services/rag/connectors/sharepoint.py",
+
+    "app/services/rag/query_analysis.py",
+
+    "app/core/body_limit.py",
+
+    "app/core/watchdog.py",
+
+    "app/core/field_errors.py",
+    "app/core/phone.py",
+
+    "app/core/memory_keys.py",
+
+    "app/db/vector_tables.py",
+
+    "app/db/updates.py",
+    "app/services/access.py",
+
+    "app/services/rate_limit.py",
+    "app/services/agent_chat.py",
+    "app/services/agent_environment.py",
+    "app/services/agent_exposure.py",
+
+    "app/services/capability_contracts.py",
+    "app/services/agent_trigger.py",
+    "app/services/trigger_events.py",
+    "app/services/trigger_dedupe.py",
+    "app/services/trigger_templates.py",
+    "app/schemas/trigger_template.py",
+    "app/services/agent_registry.py",
+    "app/services/agent_runner.py",
+    "app/services/agent_templates.py",
+    "app/services/agent_session.py",
+
+    "app/services/run_stream.py",
+    "app/services/run_reaper.py",
+    "app/repositories/agent_workspace.py",
+    "app/repositories/local_service.py",
+    "app/repositories/sandbox_connection.py",
+    "app/repositories/skill_proposal.py",
+    "app/services/attachments.py",
+
+    "app/services/office_convert.py",
+    "app/services/chat_timeline.py",
+    "app/services/local_service.py",
+    "app/services/sandbox_connection.py",
+    "app/services/sandbox_runtimes.py",
+    "app/services/sandbox_workspace.py",
+    "app/services/usage_report.py",
+    "app/services/skill_proposal.py",
+    "app/services/skill_workspace.py",
+    "app/services/channels/attachments.py",
+    "app/services/channels/dedupe.py",
+    "app/services/channels/membership.py",
+    "app/services/channels/mentions.py",
+    "app/services/collection_access.py",
+    "app/repositories/collection_teardown.py",
+    "app/services/embed_session.py",
+    "app/services/embedding_resolution.py",
+    "app/services/approvals.py",
+    "app/services/audit.py",
+    "app/services/impersonation.py",
+    "app/services/ws_auth.py",
+    "app/services/health.py",
+    "app/services/email/templates.py",
+    "app/services/ingestion_config.py",
+    "app/services/rag/failures.py",
+
+    "app/services/notifications.py",
+    "app/services/notification_catalog.py",
+    "app/services/notification_center.py",
+    "app/services/notification_delivery.py",
+    "app/repositories/notification.py",
+    "app/api/routes/v1/notifications.py",
+
+    "app/services/announcement.py",
+    "app/repositories/announcement.py",
+    "app/api/routes/v1/admin_announcements.py",
+    "app/services/mcp_catalog.py",
+    "app/services/portal_catalog.py",
+    "app/services/portals/__init__.py",
+    "app/services/portals/base.py",
+    "app/services/portals/exceptions.py",
+    "app/services/portals/github.py",
+    "app/services/portals/github_app.py",
+    "app/services/portals/github_oauth.py",
+    "app/services/portals/registry.py",
+    "app/services/mcp_connection.py",
+
+    "app/services/decision_models.py",
+    "app/services/image_models.py",
+    "app/services/model_profile.py",
+    "app/services/organization_secret.py",
+
+    "app/services/mcp_listing.py",
+    "app/services/mcp_registry.py",
+    "app/services/speech_to_text.py",
+    "app/services/transcription.py",
+
+    "app/services/rag/remote_names.py",
+
+    "app/services/rag/_splitters.py",
+
+    "app/services/rag/filters.py",
+    "app/services/rag/parent_context.py",
+    "app/services/sharing.py",
+    "app/services/skills.py",
+    "app/services/exporting.py",
+    "app/services/run_export.py",
+    "app/services/spend.py",
+    "app/services/stats.py",
+    "app/services/transcript.py",
+    "app/repositories/agent_environment.py",
+    "app/repositories/agent_exposure.py",
+    "app/repositories/agent_trigger.py",
+    "app/repositories/ingestion_spend.py",
+    "app/repositories/mcp_connection.py",
+    "app/repositories/organization_secret.py",
+    "app/repositories/resource_grant.py",
+    "app/api/routes/v1/_sharing_routes.py",
+    "app/api/routes/v1/_sharing_loaders.py",
+    "app/api/routes/v1/secrets.py",
+    "app/api/routes/v1/agent_environments.py",
+    "app/api/routes/v1/agent_exposures.py",
+    "app/api/routes/v1/agent_triggers.py",
+    "app/api/routes/v1/trigger_webhooks.py",
+    "app/api/routes/v1/local_services.py",
+    "app/api/routes/v1/sandbox_connections.py",
+    "app/api/routes/v1/skill_changes.py",
+    "app/api/routes/v1/workspaces.py",
+    "app/api/routes/v1/_workspace_bytes.py",
+    "app/api/routes/v1/sharing.py",
+    "app/api/routes/v1/stats.py",
+    "app/repositories/run_manifest.py",
+    "app/repositories/dashboard_layout.py",
+    "app/services/dashboard_layout.py",
+    "app/api/routes/v1/me_dashboard_layout.py",
+    "app/repositories/dashboard_preset.py",
+    "app/services/dashboard_preset.py",
+    "app/repositories/context.py",
+    "app/services/context.py",
+    "app/api/routes/v1/context.py",
+    "app/db/models/artifact.py",
+    "app/schemas/artifact.py",
+    "app/repositories/artifact.py",
+    "app/services/artifact.py",
+    "app/api/routes/v1/_artifact_bytes.py",
+    "app/api/routes/v1/artifacts.py",
+    "app/repositories/memory.py",
+    "app/services/memory/_native.py",
+    "app/services/memory/facade.py",
+    "app/api/routes/v1/memory.py",
+
+    "app/repositories/conversation_search.py",
+    "app/services/conversation_search.py",
+    "app/services/generated_media.py",
+    "app/api/routes/v1/generated_media.py",
+
+    "app/db/models/deployment_settings.py",
+    "app/repositories/deployment_settings.py",
+    "app/schemas/deployment_settings.py",
+    "app/services/deployment_settings.py",
+    "app/services/signup_policy.py",
+    "app/core/maintenance.py",
+    "app/api/routes/v1/branding.py",
+    "app/api/routes/v1/_branding_bytes.py",
+    "app/api/routes/v1/_chat_file_bytes.py",
+    "app/api/routes/v1/admin_deployment_settings.py",
+    "app/db/locks.py",
+    "app/services/invitation_admission.py",
+
+    "app/core/otel_compat.py",
+
+    "app/services/deployment_profile.py",
+
+    "app/core/retention.py",
+    "app/repositories/retention.py",
+    "app/services/retention.py",
+
+    "app/api/exception_handlers.py",
+
+    "app/services/ml/catalog.py",
+    "app/services/ml/pii.py",
+    "app/services/ml/parsing.py",
+    "app/services/ml/facade.py",
+    "app/db/models/ml_service_call.py",
+    "app/repositories/ml_service_call.py",
+    "app/schemas/ml.py",
+    "app/api/routes/v1/ml.py",
+
+    "app/db/models/group.py",
+    "app/db/models/directory_mapping.py",
+    "app/repositories/group.py",
+    "app/repositories/directory_mapping.py",
+    "app/schemas/group.py",
+    "app/schemas/directory.py",
+    "app/services/group.py",
+    "app/services/directory/**",
+    "app/api/routes/v1/groups.py",
+    "app/api/routes/v1/directory_mappings.py",
+    "app/api/routes/v1/directory_auth.py",
+    "app/api/routes/v1/_directory_handoff.py",
+]
+
+exclude = [
+    "app/agents/mcp_oauth.py",
+]
+
+[tool.ty.overrides.rules]
+invalid-parameter-default = "error"
+invalid-argument-type = "error"
+invalid-assignment = "error"
+unresolved-attribute = "error"
+deprecated = "error"
+no-matching-overload = "error"
+unused-type-ignore-comment = "error"
+unsupported-operator = "error"
+invalid-await = "error"
+invalid-context-manager = "error"
+missing-argument = "error"
+
+unused-ignore-comment = "error"
+
+unresolved-import = "error"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+addopts = "--strict-markers"
+markers = [
+    "security: a refusal or security-boundary test. Collected as a set so the security report can show the refusals rather than assert them (#1417) — tenant isolation, permission and grant refusals, a budget checked before the model call, an approval decided once, secret confidentiality, spec publish validation, channel sender identity, constant-time credential compare, webhook HMAC and rate limits. It is a label for the report, not a second gate: `make check` still runs everything.",
+]
+
+[tool.fastapi-fullstack]
+generator_version = "0.2.17"
+generated_at = "2026-07-26T18:01:04.489757+00:00"
+
+[tool.coverage.run]
+
+include = [
+    "app/agents/**",
+    "app/commands/bootstrap.py",
+    "app/commands/audit_skill_bindings.py",
+    "app/commands/audit_verify.py",
+    "app/commands/vault_rotate.py",
+    "app/commands/sandbox_runtimes.py",
+    "app/commands/invite_members.py",
+    "app/commands/data_protection.py",
+    "app/core/permissions.py",
+    "app/core/catalog/**",
+    "app/core/secret_kinds.py",
+    "app/core/vault.py",
+
+    "app/core/audit.py",
+    "app/core/background.py",
+
+    "app/core/blocking.py",
+
+    "app/core/office_convert.py",
+
+    "app/core/sanitize.py",
+
+    "app/core/excerpt.py",
+
+    "app/core/pinned_http.py",
+
+    "app/services/rag/connectors/web.py",
+    "app/services/rag/connectors/web_page.py",
+
+    "app/services/rag/connectors/sharepoint.py",
+
+    "app/services/rag/query_analysis.py",
+
+    "app/core/body_limit.py",
+
+    "app/core/watchdog.py",
+
+    "app/core/field_errors.py",
+    "app/core/phone.py",
+
+    "app/core/memory_keys.py",
+
+    "app/db/vector_tables.py",
+
+    "app/db/updates.py",
+    "app/services/access.py",
+
+    "app/services/rate_limit.py",
+    "app/services/agent_chat.py",
+    "app/services/agent_environment.py",
+    "app/services/agent_exposure.py",
+
+    "app/services/capability_contracts.py",
+    "app/services/agent_trigger.py",
+    "app/services/trigger_events.py",
+    "app/services/trigger_dedupe.py",
+    "app/services/trigger_templates.py",
+    "app/schemas/trigger_template.py",
+    "app/services/agent_registry.py",
+    "app/services/agent_runner.py",
+    "app/services/agent_templates.py",
+
+    "app/services/agent_session.py",
+
+    "app/services/run_stream.py",
+    "app/services/run_reaper.py",
+    "app/repositories/agent_workspace.py",
+    "app/repositories/local_service.py",
+    "app/repositories/sandbox_connection.py",
+    "app/repositories/skill_proposal.py",
+    "app/services/attachments.py",
+
+    "app/services/office_convert.py",
+    "app/services/chat_timeline.py",
+    "app/services/local_service.py",
+    "app/services/sandbox_connection.py",
+    "app/services/sandbox_runtimes.py",
+    "app/services/sandbox_workspace.py",
+    "app/services/usage_report.py",
+    "app/services/skill_proposal.py",
+    "app/services/skill_workspace.py",
+    "app/services/channels/attachments.py",
+    "app/services/channels/dedupe.py",
+    "app/services/channels/membership.py",
+    "app/services/channels/mentions.py",
+    "app/services/collection_access.py",
+    "app/repositories/collection_teardown.py",
+
+    "app/services/embed_session.py",
+    "app/services/embedding_resolution.py",
+    "app/services/approvals.py",
+
+    "app/services/audit.py",
+
+    "app/services/impersonation.py",
+
+    "app/services/ws_auth.py",
+
+    "app/services/health.py",
+
+    "app/services/email/templates.py",
+
+    "app/services/ingestion_config.py",
+
+    "app/services/rag/failures.py",
+
+    "app/services/notifications.py",
+    "app/services/notification_catalog.py",
+    "app/services/notification_center.py",
+    "app/services/notification_delivery.py",
+    "app/repositories/notification.py",
+    "app/api/routes/v1/notifications.py",
+
+    "app/services/announcement.py",
+    "app/repositories/announcement.py",
+    "app/api/routes/v1/admin_announcements.py",
+    "app/services/mcp_catalog.py",
+    "app/services/portal_catalog.py",
+    "app/services/portals/__init__.py",
+    "app/services/portals/base.py",
+    "app/services/portals/exceptions.py",
+    "app/services/portals/github.py",
+    "app/services/portals/github_app.py",
+    "app/services/portals/github_oauth.py",
+    "app/services/portals/registry.py",
+    "app/services/mcp_connection.py",
+
+    "app/services/decision_models.py",
+    "app/services/image_models.py",
+    "app/services/model_profile.py",
+    "app/services/organization_secret.py",
+
+    "app/services/mcp_listing.py",
+    "app/services/mcp_registry.py",
+    "app/services/speech_to_text.py",
+    "app/services/transcription.py",
+
+    "app/services/rag/remote_names.py",
+
+    "app/services/rag/_splitters.py",
+
+    "app/services/rag/filters.py",
+    "app/services/rag/parent_context.py",
+    "app/services/sharing.py",
+    "app/services/skills.py",
+    "app/services/exporting.py",
+    "app/services/run_export.py",
+    "app/services/spend.py",
+    "app/services/stats.py",
+    "app/services/transcript.py",
+    "app/repositories/agent_environment.py",
+    "app/repositories/agent_exposure.py",
+    "app/repositories/agent_trigger.py",
+    "app/repositories/ingestion_spend.py",
+    "app/repositories/mcp_connection.py",
+    "app/repositories/organization_secret.py",
+    "app/repositories/resource_grant.py",
+    "app/api/routes/v1/_sharing_routes.py",
+    "app/api/routes/v1/_sharing_loaders.py",
+    "app/api/routes/v1/secrets.py",
+    "app/api/routes/v1/agent_environments.py",
+    "app/api/routes/v1/agent_exposures.py",
+    "app/api/routes/v1/agent_triggers.py",
+    "app/api/routes/v1/trigger_webhooks.py",
+    "app/api/routes/v1/local_services.py",
+    "app/api/routes/v1/sandbox_connections.py",
+    "app/api/routes/v1/skill_changes.py",
+    "app/api/routes/v1/workspaces.py",
+    "app/api/routes/v1/_workspace_bytes.py",
+    "app/api/routes/v1/sharing.py",
+    "app/api/routes/v1/stats.py",
+    "app/repositories/run_manifest.py",
+    "app/repositories/dashboard_layout.py",
+    "app/services/dashboard_layout.py",
+    "app/api/routes/v1/me_dashboard_layout.py",
+    "app/repositories/dashboard_preset.py",
+    "app/services/dashboard_preset.py",
+    "app/repositories/context.py",
+    "app/services/context.py",
+    "app/api/routes/v1/context.py",
+    "app/db/models/artifact.py",
+    "app/schemas/artifact.py",
+    "app/repositories/artifact.py",
+    "app/services/artifact.py",
+    "app/api/routes/v1/_artifact_bytes.py",
+    "app/api/routes/v1/artifacts.py",
+    "app/repositories/memory.py",
+    "app/services/memory/_native.py",
+    "app/services/memory/facade.py",
+    "app/api/routes/v1/memory.py",
+
+    "app/repositories/conversation_search.py",
+    "app/services/conversation_search.py",
+    "app/services/generated_media.py",
+    "app/api/routes/v1/generated_media.py",
+
+    "app/db/models/deployment_settings.py",
+    "app/repositories/deployment_settings.py",
+    "app/schemas/deployment_settings.py",
+    "app/services/deployment_settings.py",
+    "app/services/signup_policy.py",
+    "app/core/maintenance.py",
+    "app/api/routes/v1/branding.py",
+    "app/api/routes/v1/_branding_bytes.py",
+    "app/api/routes/v1/_chat_file_bytes.py",
+    "app/api/routes/v1/admin_deployment_settings.py",
+    "app/db/locks.py",
+    "app/services/invitation_admission.py",
+
+    "app/core/otel_compat.py",
+
+    "app/services/deployment_profile.py",
+
+    "app/core/retention.py",
+    "app/repositories/retention.py",
+    "app/services/retention.py",
+
+    "app/api/exception_handlers.py",
+
+    "app/services/ml/catalog.py",
+    "app/services/ml/pii.py",
+    "app/services/ml/parsing.py",
+    "app/services/ml/facade.py",
+    "app/db/models/ml_service_call.py",
+    "app/repositories/ml_service_call.py",
+    "app/schemas/ml.py",
+    "app/api/routes/v1/ml.py",
+
+    "app/db/models/group.py",
+    "app/db/models/directory_mapping.py",
+    "app/repositories/group.py",
+    "app/repositories/directory_mapping.py",
+    "app/schemas/group.py",
+    "app/schemas/directory.py",
+    "app/services/group.py",
+    "app/services/directory/**",
+    "app/api/routes/v1/groups.py",
+    "app/api/routes/v1/directory_mappings.py",
+    "app/api/routes/v1/directory_auth.py",
+    "app/api/routes/v1/_directory_handoff.py",
+]
+branch = true
+omit = [
+
+    "app/agents/mcp_oauth.py",
+]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]

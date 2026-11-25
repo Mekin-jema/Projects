@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 # files are already compressed, and gzipping a download drops its `Content-Length`
 # and with it the browser's progress bar.
 UNCOMPRESSED_CONTENT_TYPES = (
+    # * This is iterable unpacking.
     *DEFAULT_EXCLUDED_CONTENT_TYPES,
     "application/octet-stream",
     "application/pdf",
@@ -90,6 +91,7 @@ async def _start_channel_polling(channel: str) -> None:
     not keep the whole API from starting, which is what it did on a machine
     where the quickstart had reused a development stack's database.
     """
+ # The async with ensures that the database context is properly cleaned up when the block finishes.
     async with get_db_context() as _db:
         _bots = await get_active_polling_bots(_db, channel)
     started = 0
